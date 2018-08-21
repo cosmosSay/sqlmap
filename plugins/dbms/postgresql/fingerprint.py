@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 from lib.core.common import Backend
 from lib.core.common import Format
-from lib.core.common import singleTimeWarnMessage
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
@@ -15,7 +14,6 @@ from lib.core.enums import DBMS
 from lib.core.enums import OS
 from lib.core.session import setDbms
 from lib.core.settings import PGSQL_ALIASES
-from lib.core.settings import PGSQL_SYSTEM_DBS
 from lib.request import inject
 from plugins.generic.fingerprint import Fingerprint as GenericFingerprint
 
@@ -62,10 +60,10 @@ class Fingerprint(GenericFingerprint):
         """
         References for fingerprint:
 
-        * http://www.postgresql.org/docs/9.1/interactive/release.html (up to 9.1.3)
+        * https://www.postgresql.org/docs/current/static/release.html
         """
 
-        if not conf.extensiveFp and (Backend.isDbmsWithin(PGSQL_ALIASES) or conf.dbms in PGSQL_ALIASES):
+        if not conf.extensiveFp and Backend.isDbmsWithin(PGSQL_ALIASES):
             setDbms(DBMS.PGSQL)
 
             self.getBanner()
@@ -99,8 +97,20 @@ class Fingerprint(GenericFingerprint):
             infoMsg = "actively fingerprinting %s" % DBMS.PGSQL
             logger.info(infoMsg)
 
-            if inject.checkBooleanExpression("REVERSE('sqlmap')='pamlqs'"):
-                Backend.setVersion(">= 9.1.0")
+            if inject.checkBooleanExpression("XMLTABLE(NULL) IS NULL"):
+                Backend.setVersion(">= 10.0")
+            elif inject.checkBooleanExpression("SIND(0)=0"):
+                Backend.setVersionList([">= 9.6.0", "< 10.0"])
+            elif inject.checkBooleanExpression("TO_JSONB(1) IS NOT NULL"):
+                Backend.setVersionList([">= 9.5.0", "< 9.6.0"])
+            elif inject.checkBooleanExpression("JSON_TYPEOF(NULL) IS NULL"):
+                Backend.setVersionList([">= 9.4.0", "< 9.5.0"])
+            elif inject.checkBooleanExpression("ARRAY_REPLACE(NULL,1,1) IS NULL"):
+                Backend.setVersionList([">= 9.3.0", "< 9.4.0"])
+            elif inject.checkBooleanExpression("ROW_TO_JSON(NULL) IS NULL"):
+                Backend.setVersionList([">= 9.2.0", "< 9.3.0"])
+            elif inject.checkBooleanExpression("REVERSE('sqlmap')='pamlqs'"):
+                Backend.setVersionList([">= 9.1.0", "< 9.2.0"])
             elif inject.checkBooleanExpression("LENGTH(TO_CHAR(1,'EEEE'))>0"):
                 Backend.setVersionList([">= 9.0.0", "< 9.1.0"])
             elif inject.checkBooleanExpression("2=(SELECT DIV(6,3))"):

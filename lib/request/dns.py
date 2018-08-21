@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import os
@@ -59,12 +59,30 @@ class DNSQuery(object):
 
 class DNSServer(object):
     def __init__(self):
+        self._check_localhost()
         self._requests = []
         self._lock = threading.Lock()
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._socket = socket._orig_socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except AttributeError:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.bind(("", 53))
         self._running = False
+        self._initialized = False
+
+    def _check_localhost(self):
+        response = ""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("", 53))
+            s.send("6509012000010000000000010377777706676f6f676c6503636f6d00000100010000291000000000000000".decode("hex"))  # A www.google.com
+            response = s.recv(512)
+        except:
+            pass
+        finally:
+            if response and "google" in response:
+                raise socket.error("another DNS service already running on *:53")
 
     def pop(self, prefix=None, suffix=None):
         """
@@ -76,7 +94,7 @@ class DNSServer(object):
 
         with self._lock:
             for _ in self._requests:
-                if prefix is None and suffix is None or re.search("%s\..+\.%s" % (prefix, suffix), _, re.I):
+                if prefix is None and suffix is None or re.search(r"%s\..+\.%s" % (prefix, suffix), _, re.I):
                     retVal = _
                     self._requests.remove(_)
                     break
@@ -91,6 +109,7 @@ class DNSServer(object):
         def _():
             try:
                 self._running = True
+                self._initialized = True
 
                 while True:
                     data, addr = self._socket.recvfrom(1024)
@@ -115,6 +134,9 @@ if __name__ == "__main__":
     try:
         server = DNSServer()
         server.run()
+
+        while not server._initialized:
+            time.sleep(0.1)
 
         while server._running:
             while True:

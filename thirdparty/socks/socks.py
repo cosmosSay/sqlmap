@@ -52,7 +52,7 @@ PROXY_TYPE_SOCKS5 = 2
 PROXY_TYPE_HTTP = 3
 
 _defaultproxy = None
-_orgsocket = socket.socket
+socket._orig_socket = _orgsocket = _orig_socket = socket.socket
 _orgcreateconnection = socket.create_connection
 
 class ProxyError(Exception): pass

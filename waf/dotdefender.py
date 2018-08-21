@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 from lib.core.settings import WAF_ATTACK_VECTORS
@@ -13,9 +13,10 @@ def detect(get_page):
     retval = False
 
     for vector in WAF_ATTACK_VECTORS:
-        page, headers, code = get_page(get=vector)
-        retVal = headers.get("X-dotDefender-denied", "") == "1"
-        if retVal:
+        page, headers, _ = get_page(get=vector)
+        retval = headers.get("X-dotDefender-denied", "") == "1"
+        retval |= "dotDefender Blocked Your Request" in (page or "")
+        if retval:
             break
 
     return retval

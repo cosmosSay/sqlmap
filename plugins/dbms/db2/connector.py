@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 try:
     import ibm_db_dbi
-except ImportError:
+except:
     pass
 
 import logging
@@ -19,9 +19,9 @@ from plugins.generic.connector import Connector as GenericConnector
 
 class Connector(GenericConnector):
     """
-    Homepage: http://code.google.com/p/ibm-db/
-    User guide: http://code.google.com/p/ibm-db/wiki/README
-    API: http://www.python.org/dev/peps/pep-0249/
+    Homepage: https://github.com/ibmdb/python-ibmdb
+    User guide: https://github.com/ibmdb/python-ibmdb/wiki/README
+    API: https://www.python.org/dev/peps/pep-0249/
     License: Apache License 2.0
     """
 
@@ -36,7 +36,6 @@ class Connector(GenericConnector):
             self.connector = ibm_db_dbi.connect(database, self.user, self.password)
         except ibm_db_dbi.OperationalError, msg:
             raise SqlmapConnectionException(msg)
-
 
         self.initCursor()
         self.printConnected()

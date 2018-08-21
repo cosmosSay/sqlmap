@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import errno
 import os
 import subprocess
-import sys
 import time
 
 from lib.core.settings import IS_WIN
@@ -23,11 +22,6 @@ if IS_WIN:
 else:
     import select
     import fcntl
-
-    if (sys.hexversion >> 16) >= 0x202:
-        FCNTL = fcntl
-    else:
-        import FCNTL
 
 def blockingReadFromFD(fd):
     # Quick twist around original Twisted function
@@ -120,7 +114,7 @@ class Popen(subprocess.Popen):
                     nAvail = maxsize
                 if nAvail > 0:
                     (errCode, read) = ReadFile(x, nAvail, None)
-            except ValueError:
+            except (ValueError, NameError):
                 return self._close(which)
             except (subprocess.pywintypes.error, Exception), why:
                 if why[0] in (109, errno.ESHUTDOWN):
@@ -197,4 +191,6 @@ def send_all(p, data):
 
     while len(data):
         sent = p.send(data)
+        if not isinstance(sent, int):
+            break
         data = buffer(data, sent)

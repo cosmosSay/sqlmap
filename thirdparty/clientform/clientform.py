@@ -1124,6 +1124,7 @@ def _ParseFileEx(file, base_uri,
         if action is None:
             action = base_uri
         else:
+            action = unicode(action, "utf8") if action and not isinstance(action, unicode) else action
             action = _urljoin(base_uri, action)
         # would be nice to make HTMLForm class (form builder) pluggable
         form = HTMLForm(
@@ -1138,7 +1139,11 @@ def _ParseFileEx(file, base_uri,
                 type, name, attrs, select_default=select_default, index=ii*10)
         forms.append(form)
     for form in forms:
-        form.fixup()
+        try:
+            form.fixup()
+        except AttributeError, ex:
+            if not any(_ in str(ex) for _ in ("is disabled", "is readonly")):
+                raise
     return forms
 
 
@@ -2450,7 +2455,7 @@ class SubmitControl(ScalarControl):
         # IE5 defaults SUBMIT value to "Submit Query"; Firebird 0.6 leaves it
         # blank, Konqueror 3.1 defaults to "Submit".  HTML spec. doesn't seem
         # to define this.
-        if self.value is None: self.value = ""
+        if self.value is None and not self.disabled and not self.readonly: self.value = ""
         self.readonly = True
 
     def get_labels(self):

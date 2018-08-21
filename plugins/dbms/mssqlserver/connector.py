@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 try:
     import _mssql
     import pymssql
-except ImportError:
+except:
     pass
 
 import logging
@@ -21,9 +21,9 @@ from plugins.generic.connector import Connector as GenericConnector
 
 class Connector(GenericConnector):
     """
-    Homepage: http://pymssql.sourceforge.net/
-    User guide: http://pymssql.sourceforge.net/examples_pymssql.php
-    API: http://pymssql.sourceforge.net/ref_pymssql.php
+    Homepage: http://www.pymssql.org/en/stable/
+    User guide: http://www.pymssql.org/en/stable/pymssql_examples.html
+    API: http://www.pymssql.org/en/stable/ref/pymssql.html
     Debian package: python-pymssql
     License: LGPL
 
@@ -41,8 +41,10 @@ class Connector(GenericConnector):
 
         try:
             self.connector = pymssql.connect(host="%s:%d" % (self.hostname, self.port), user=self.user, password=self.password, database=self.db, login_timeout=conf.timeout, timeout=conf.timeout)
-        except (pymssql.InterfaceError, pymssql.OperationalError), msg:
+        except (pymssql.Error, _mssql.MssqlDatabaseException), msg:
             raise SqlmapConnectionException(msg)
+        except ValueError:
+            raise SqlmapConnectionException
 
         self.initCursor()
         self.printConnected()
@@ -50,7 +52,7 @@ class Connector(GenericConnector):
     def fetchall(self):
         try:
             return self.cursor.fetchall()
-        except (pymssql.ProgrammingError, pymssql.OperationalError, _mssql.MssqlDatabaseException), msg:
+        except (pymssql.Error, _mssql.MssqlDatabaseException), msg:
             logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % str(msg).replace("\n", " "))
             return None
 

@@ -1,28 +1,33 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
+
+import os
 
 from xml.etree import ElementTree as et
 
+from lib.core.common import getSafeExString
 from lib.core.data import conf
 from lib.core.data import paths
 from lib.core.datatype import AttribDict
+from lib.core.exception import SqlmapInstallationException
+from lib.core.settings import PAYLOAD_XML_FILES
 
 def cleanupVals(text, tag):
     if tag in ("clause", "where"):
         text = text.split(',')
 
     if isinstance(text, basestring):
-        text = int(text) if text.isdigit() else str(text)
+        text = int(text) if text.isdigit() else text
 
     elif isinstance(text, list):
         count = 0
 
         for _ in text:
-            text[count] = int(_) if _.isdigit() else str(_)
+            text[count] = int(_) if _.isdigit() else _
             count += 1
 
         if len(text) == 1 and tag not in ("clause", "where"):
@@ -31,7 +36,7 @@ def cleanupVals(text, tag):
     return text
 
 def parseXmlNode(node):
-    for element in node.getiterator('boundary'):
+    for element in node.getiterator("boundary"):
         boundary = AttribDict()
 
         for child in element.getchildren():
@@ -43,7 +48,7 @@ def parseXmlNode(node):
 
         conf.boundaries.append(boundary)
 
-    for element in node.getiterator('test'):
+    for element in node.getiterator("test"):
         test = AttribDict()
 
         for child in element.getchildren():
@@ -66,7 +71,29 @@ def parseXmlNode(node):
 
         conf.tests.append(test)
 
-def loadPayloads():
-    doc = et.parse(paths.PAYLOADS_XML)
+def loadBoundaries():
+    try:
+        doc = et.parse(paths.BOUNDARIES_XML)
+    except Exception, ex:
+        errMsg = "something appears to be wrong with "
+        errMsg += "the file '%s' ('%s'). Please make " % (paths.BOUNDARIES_XML, getSafeExString(ex))
+        errMsg += "sure that you haven't made any changes to it"
+        raise SqlmapInstallationException(errMsg)
+
     root = doc.getroot()
     parseXmlNode(root)
+
+def loadPayloads():
+    for payloadFile in PAYLOAD_XML_FILES:
+        payloadFilePath = os.path.join(paths.SQLMAP_XML_PAYLOADS_PATH, payloadFile)
+
+        try:
+            doc = et.parse(payloadFilePath)
+        except Exception, ex:
+            errMsg = "something appears to be wrong with "
+            errMsg += "the file '%s' ('%s'). Please make " % (payloadFilePath, getSafeExString(ex))
+            errMsg += "sure that you haven't made any changes to it"
+            raise SqlmapInstallationException(errMsg)
+
+        root = doc.getroot()
+        parseXmlNode(root)

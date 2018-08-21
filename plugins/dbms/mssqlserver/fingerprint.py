@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 from lib.core.common import Backend
@@ -65,9 +65,7 @@ class Fingerprint(GenericFingerprint):
         return value
 
     def checkDbms(self):
-        if not conf.extensiveFp and (Backend.isDbmsWithin(MSSQL_ALIASES) \
-           or conf.dbms in MSSQL_ALIASES) and Backend.getVersion() and \
-           Backend.getVersion().isdigit():
+        if not conf.extensiveFp and Backend.isDbmsWithin(MSSQL_ALIASES):
             setDbms("%s %s" % (DBMS.MSSQL, Backend.getVersion()))
 
             self.getBanner()
@@ -84,16 +82,20 @@ class Fingerprint(GenericFingerprint):
         if conf.direct:
             result = True
         else:
-            result = inject.checkBooleanExpression("BINARY_CHECKSUM([RANDNUM])=BINARY_CHECKSUM([RANDNUM])")
+            result = inject.checkBooleanExpression("UNICODE(SQUARE(NULL)) IS NULL")
 
         if result:
             infoMsg = "confirming %s" % DBMS.MSSQL
             logger.info(infoMsg)
 
-            for version, check in (("2000", "HOST_NAME()=HOST_NAME()"), \
-                                    ("2005", "XACT_STATE()=XACT_STATE()"), \
-                                    ("2008", "SYSDATETIME()=SYSDATETIME()"), \
-                                    ("2012", "CONCAT(NULL,NULL)=CONCAT(NULL,NULL)")):
+            for version, check in (
+                ("2000", "HOST_NAME()=HOST_NAME()"),
+                ("2005", "XACT_STATE()=XACT_STATE()"),
+                ("2008", "SYSDATETIME()=SYSDATETIME()"),
+                ("2012", "CONCAT(NULL,NULL)=CONCAT(NULL,NULL)"),
+                ("2014", "CHARINDEX('12.0.2000',@@version)>0"),
+                ("2016", "ISJSON(NULL) IS NULL")
+            ):
                 result = inject.checkBooleanExpression(check)
 
                 if result:
@@ -134,19 +136,23 @@ class Fingerprint(GenericFingerprint):
         self.createSupportTbl(self.fileTblName, self.tblField, "varchar(1000)")
         inject.goStacked("INSERT INTO %s(%s) VALUES (%s)" % (self.fileTblName, self.tblField, "@@VERSION"))
 
-        versions = { "2003": ("5.2", (2, 1)),
-                     # TODO: verify this
-                     #"2003": ("6.0", (2, 1)),
-                     "2008": ("7.0", (1,)),
-                     "2000": ("5.0", (4, 3, 2, 1)),
-                     "7": ("6.1", (1, 0)),
-                     "XP": ("5.1", (2, 1)),
-                     "NT": ("4.0", (6, 5, 4, 3, 2, 1)) }
+        # Reference: https://en.wikipedia.org/wiki/Comparison_of_Microsoft_Windows_versions
+        # https://en.wikipedia.org/wiki/Windows_NT#Releases
+        versions = {
+            "NT": ("4.0", (6, 5, 4, 3, 2, 1)),
+            "2000": ("5.0", (4, 3, 2, 1)),
+            "XP": ("5.1", (3, 2, 1)),
+            "2003": ("5.2", (2, 1)),
+            "Vista or 2008": ("6.0", (2, 1)),
+            "7 or 2008 R2": ("6.1", (1, 0)),
+            "8 or 2012": ("6.2", (0,)),
+            "8.1 or 2012 R2": ("6.3", (0,))
+        }
 
         # Get back-end DBMS underlying operating system version
         for version, data in versions.items():
-            query = "(SELECT LEN(%s) FROM %s WHERE %s " % (self.tblField, self.fileTblName, self.tblField)
-            query += "LIKE '%Windows NT " + data[0] + "%')>0"
+            query = "EXISTS(SELECT %s FROM %s WHERE %s " % (self.tblField, self.fileTblName, self.tblField)
+            query += "LIKE '%Windows NT " + data[0] + "%')"
             result = inject.checkBooleanExpression(query)
 
             if result:
@@ -169,13 +175,12 @@ class Fingerprint(GenericFingerprint):
 
         # Get back-end DBMS underlying operating system service pack
         sps = versions[Backend.getOsVersion()][1]
-
         for sp in sps:
-            query = "SELECT LEN(%s) FROM %s WHERE %s " % (self.tblField, self.fileTblName, self.tblField)
-            query += "LIKE '%Service Pack " + getUnicode(sp) + "%'"
-            result = inject.goStacked(query)
+            query = "EXISTS(SELECT %s FROM %s WHERE %s " % (self.tblField, self.fileTblName, self.tblField)
+            query += "LIKE '%Service Pack " + getUnicode(sp) + "%')"
+            result = inject.checkBooleanExpression(query)
 
-            if result is not None and len(result) > 0 and result[0].isdigit():
+            if result:
                 Backend.setOsServicePack(sp)
                 break
 

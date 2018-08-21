@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import time
@@ -24,6 +24,7 @@ from lib.core.dicts import SQL_STATEMENTS
 from lib.core.enums import CUSTOM_LOGGING
 from lib.core.enums import DBMS
 from lib.core.enums import EXPECTED
+from lib.core.enums import TIMEOUT_STATE
 from lib.core.settings import UNICODE_ENCODING
 from lib.utils.timeout import timeout
 
@@ -33,7 +34,7 @@ def direct(query, content=True):
     query = agent.adjustLateValues(query)
     threadData = getCurrentThreadData()
 
-    if Backend.isDbms(DBMS.ORACLE) and query.startswith("SELECT ") and " FROM " not in query:
+    if Backend.isDbms(DBMS.ORACLE) and query.upper().startswith("SELECT ") and " FROM " not in query.upper():
         query = "%s FROM DUAL" % query
 
     for sqlTitle, sqlStatements in SQL_STATEMENTS.items():
@@ -50,14 +51,19 @@ def direct(query, content=True):
     output = hashDBRetrieve(query, True, True)
     start = time.time()
 
-    if not select and "EXEC " not in query:
-        _ = timeout(func=conf.dbmsConnector.execute, args=(query,), duration=conf.timeout, default=None)
+    if not select and "EXEC " not in query.upper():
+        timeout(func=conf.dbmsConnector.execute, args=(query,), duration=conf.timeout, default=None)
     elif not (output and "sqlmapoutput" not in query and "sqlmapfile" not in query):
-        output = timeout(func=conf.dbmsConnector.select, args=(query,), duration=conf.timeout, default=None)
-        hashDBWrite(query, output, True)
+        output, state = timeout(func=conf.dbmsConnector.select, args=(query,), duration=conf.timeout, default=None)
+        if state == TIMEOUT_STATE.NORMAL:
+            hashDBWrite(query, output, True)
+        elif state == TIMEOUT_STATE.TIMEOUT:
+            conf.dbmsConnector.close()
+            conf.dbmsConnector.connect()
     elif output:
         infoMsg = "resumed: %s..." % getUnicode(output, UNICODE_ENCODING)[:20]
         logger.info(infoMsg)
+
     threadData.lastQueryDuration = calculateDeltaSeconds(start)
 
     if not output:

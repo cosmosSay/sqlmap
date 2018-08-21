@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import re
@@ -16,7 +16,7 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces greater than operator ('>') with 'NOT BETWEEN 0 AND #'
+    Replaces greater than operator ('>') with 'NOT BETWEEN 0 AND #' and equals operator ('=') with 'BETWEEN # AND #'
 
     Tested against:
         * Microsoft SQL Server 2005
@@ -32,6 +32,8 @@ def tamper(payload, **kwargs):
 
     >>> tamper('1 AND A > B--')
     '1 AND A NOT BETWEEN 0 AND B--'
+    >>> tamper('1 AND A = B--')
+    '1 AND A BETWEEN B AND B--'
     """
 
     retVal = payload
@@ -43,6 +45,13 @@ def tamper(payload, **kwargs):
             _ = "%s %s NOT BETWEEN 0 AND %s" % (match.group(2), match.group(4), match.group(5))
             retVal = retVal.replace(match.group(0), _)
         else:
-            retVal = re.sub(r"\s*>\s*(\d+|'[^']+')", " NOT BETWEEN 0 AND \g<1>", payload)
+            retVal = re.sub(r"\s*>\s*(\d+|'[^']+'|\w+\(\d+\))", r" NOT BETWEEN 0 AND \g<1>", payload)
+
+        if retVal == payload:
+            match = re.search(r"(?i)(\b(AND|OR)\b\s+)(?!.*\b(AND|OR)\b)([^=]+?)\s*=\s*(\w+)\s*", payload)
+
+            if match:
+                _ = "%s %s BETWEEN %s AND %s" % (match.group(2), match.group(4), match.group(5), match.group(5))
+                retVal = retVal.replace(match.group(0), _)
 
     return retVal

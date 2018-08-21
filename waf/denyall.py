@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import re
@@ -18,7 +18,7 @@ def detect(get_page):
     for vector in WAF_ATTACK_VECTORS:
         page, headers, code = get_page(get=vector)
         retval = re.search(r"\Asessioncookie=", headers.get(HTTP_HEADER.SET_COOKIE, ""), re.I) is not None
-        retval |= code == 200 and re.search(r"\ACondition Intercepted", page, re.I) is not None
+        retval |= code == 200 and re.search(r"\ACondition Intercepted", page or "", re.I) is not None
         if retval:
             break
 

@@ -7,27 +7,50 @@
         <info type="Windows"/>
     </regexp>
 
-    <regexp value="Service Pack (\d)">
+    <regexp value="Service Pack 0">
+        <info sp="0"/>
+    </regexp>
+
+    <regexp value="Service Pack 1">
         <info sp="1"/>
     </regexp>
 
-    <regexp value="Windows.*7\.5">
-        <info type="Windows" distrib="2008"/>
+    <regexp value="Service Pack 2">
+        <info sp="2"/>
     </regexp>
 
-    <regexp value="Windows.*7\.0">
-        <info type="Windows" distrib="Vista"/>
+    <regexp value="Service Pack 3">
+        <info sp="3"/>
+    </regexp>
+
+    <regexp value="Service Pack 4">
+        <info sp="4"/>
+    </regexp>
+
+    <regexp value="Service Pack 5">
+        <info sp="5"/>
+    </regexp>
+
+    <!-- Reference: https://msdn.microsoft.com/en-us/library/windows/desktop/ms724832%28v=vs.85%29.aspx -->
+
+    <regexp value="Windows.*10\.0">
+        <info type="Windows" distrib="2016|10"/>
+    </regexp>
+
+    <regexp value="Windows.*6\.3">
+        <info type="Windows" distrib="2012 R2|8.1"/>
+    </regexp>
+
+    <regexp value="Windows.*6\.2">
+        <info type="Windows" distrib="2012|8"/>
     </regexp>
 
     <regexp value="Windows.*6\.1">
-        <info type="Windows" distrib="7"/>
+        <info type="Windows" distrib="2008 R2|7"/>
     </regexp>
 
     <regexp value="Windows.*6\.0">
-        <!-- TODO: verify this
-        <info type="Windows" distrib="Vista"/>
-        -->
-        <info type="Windows" distrib="2003"/>
+        <info type="Windows" distrib="2008|Vista"/>
     </regexp>
 
     <regexp value="Windows.*5\.2">
@@ -96,7 +119,7 @@
         <info type="Linux" distrib="Mandriva"/>
     </regexp>
 
-    <regexp value="Red[\-\_\ ]*Hat">
+    <regexp value="Red[\-\_\ ]?Hat">
         <info type="Linux" distrib="Red Hat"/>
     </regexp>
 
@@ -128,7 +151,7 @@
 
     <!-- Mac OSX -->
 
-    <regexp value="Mac[\-\_\ ]*OSX">
+    <regexp value="Mac[\-\_\ ]?OSX">
         <info type="Mac OSX"/>
     </regexp>
 

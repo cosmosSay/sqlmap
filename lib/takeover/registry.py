@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import os
@@ -10,6 +10,7 @@ import os
 from lib.core.common import randomStr
 from lib.core.data import conf
 from lib.core.data import logger
+from lib.core.enums import REGISTRY_OPERATION
 
 class Registry:
     """
@@ -32,28 +33,28 @@ class Registry:
             readParse = "REG QUERY \"" + self._regKey + "\" /v \"" + self._regValue + "\""
 
         self._batRead = (
-                           "@ECHO OFF\r\n",
-                           readParse,
-                        )
+            "@ECHO OFF\r\n",
+            readParse,
+        )
 
         self._batAdd = (
-                           "@ECHO OFF\r\n",
-                           "REG ADD \"%s\" /v \"%s\" /t %s /d %s /f" % (self._regKey, self._regValue, self._regType, self._regData),
-                       )
+            "@ECHO OFF\r\n",
+            "REG ADD \"%s\" /v \"%s\" /t %s /d %s /f" % (self._regKey, self._regValue, self._regType, self._regData),
+        )
 
         self._batDel = (
-                           "@ECHO OFF\r\n",
-                           "REG DELETE \"%s\" /v \"%s\" /f" % (self._regKey, self._regValue),
-                       )
+            "@ECHO OFF\r\n",
+            "REG DELETE \"%s\" /v \"%s\" /f" % (self._regKey, self._regValue),
+        )
 
     def _createLocalBatchFile(self):
         self._batPathFp = open(self._batPathLocal, "w")
 
-        if self._operation == "read":
+        if self._operation == REGISTRY_OPERATION.READ:
             lines = self._batRead
-        elif self._operation == "add":
+        elif self._operation == REGISTRY_OPERATION.ADD:
             lines = self._batAdd
-        elif self._operation == "delete":
+        elif self._operation == REGISTRY_OPERATION.DELETE:
             lines = self._batDel
 
         for line in lines:
@@ -70,7 +71,7 @@ class Registry:
         os.unlink(self._batPathLocal)
 
     def readRegKey(self, regKey, regValue, parse=False):
-        self._operation = "read"
+        self._operation = REGISTRY_OPERATION.READ
 
         Registry._initVars(self, regKey, regValue, parse=parse)
         self._createRemoteBatchFile()
@@ -90,7 +91,7 @@ class Registry:
         return data
 
     def addRegKey(self, regKey, regValue, regType, regData):
-        self._operation = "add"
+        self._operation = REGISTRY_OPERATION.ADD
 
         Registry._initVars(self, regKey, regValue, regType, regData)
         self._createRemoteBatchFile()
@@ -103,7 +104,7 @@ class Registry:
         self.delRemoteFile(self._batPathRemote)
 
     def delRegKey(self, regKey, regValue):
-        self._operation = "delete"
+        self._operation = REGISTRY_OPERATION.DELETE
 
         Registry._initVars(self, regKey, regValue)
         self._createRemoteBatchFile()

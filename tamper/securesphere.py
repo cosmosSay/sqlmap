@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 from lib.core.enums import PRIORITY
@@ -14,11 +14,10 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Appends special crafted string
+    Appends special crafted string for bypassing Imperva SecureSphere WAF
 
-    Notes:
-        * Useful for bypassing Imperva SecureSphere WAF
-        * Reference: http://seclists.org/fulldisclosure/2011/May/163
+    Reference:
+        * http://seclists.org/fulldisclosure/2011/May/163
 
     >>> tamper('1 AND 1=1')
     "1 AND 1=1 and '0having'='0having'"

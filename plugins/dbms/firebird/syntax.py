@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
-from lib.core.common import Backend
 from lib.core.common import isDBMSVersionAtLeast
 from plugins.generic.syntax import Syntax as GenericSyntax
 
@@ -16,6 +15,7 @@ class Syntax(GenericSyntax):
     @staticmethod
     def escape(expression, quote=True):
         """
+        >>> from lib.core.common import Backend
         >>> Backend.setVersion('2.0')
         ['2.0']
         >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar")

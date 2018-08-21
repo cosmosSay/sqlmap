@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 class PRIORITY:
@@ -22,6 +22,15 @@ class SORT_ORDER:
     FIFTH = 4
     LAST = 100
 
+# Reference: https://docs.python.org/2/library/logging.html#logging-levels
+class LOGGING_LEVELS:
+    NOTSET = 0
+    DEBUG = 10
+    INFO = 20
+    WARNING = 30
+    ERROR = 40
+    CRITICAL = 50
+
 class DBMS:
     ACCESS = "Microsoft Access"
     DB2 = "IBM DB2"
@@ -34,6 +43,7 @@ class DBMS:
     SQLITE = "SQLite"
     SYBASE = "Sybase"
     HSQLDB = "HSQLDB"
+    INFORMIX = "Informix"
 
 class DBMS_DIRECTORY_NAME:
     ACCESS = "access"
@@ -47,6 +57,7 @@ class DBMS_DIRECTORY_NAME:
     SQLITE = "sqlite"
     SYBASE = "sybase"
     HSQLDB = "hsqldb"
+    INFORMIX = "informix"
 
 class CUSTOM_LOGGING:
     PAYLOAD = 9
@@ -71,15 +82,17 @@ class PLACE:
 class POST_HINT:
     SOAP = "SOAP"
     JSON = "JSON"
+    JSON_LIKE = "JSON-like"
     MULTIPART = "MULTIPART"
     XML = "XML (generic)"
+    ARRAY_LIKE = "Array-like"
 
 class HTTPMETHOD:
     GET = "GET"
     POST = "POST"
     HEAD = "HEAD"
     PUT = "PUT"
-    DELETE = "DETELE"
+    DELETE = "DELETE"
     TRACE = "TRACE"
     OPTIONS = "OPTIONS"
     CONNECT = "CONNECT"
@@ -114,14 +127,30 @@ class HASH:
     MSSQL_OLD = r'(?i)\A0x0100[0-9a-f]{8}[0-9a-f]{80}\Z'
     MSSQL_NEW = r'(?i)\A0x0200[0-9a-f]{8}[0-9a-f]{128}\Z'
     ORACLE = r'(?i)\As:[0-9a-f]{60}\Z'
-    ORACLE_OLD = r'(?i)\A[01-9a-f]{16}\Z'
+    ORACLE_OLD = r'(?i)\A[0-9a-f]{16}\Z'
     MD5_GENERIC = r'(?i)\A[0-9a-f]{32}\Z'
     SHA1_GENERIC = r'(?i)\A[0-9a-f]{40}\Z'
-    SHA224_GENERIC = r'(?i)\A[0-9a-f]{28}\Z'
-    SHA384_GENERIC = r'(?i)\A[0-9a-f]{48}\Z'
-    SHA512_GENERIC = r'(?i)\A[0-9a-f]{64}\Z'
-    CRYPT_GENERIC = r'(?i)\A(?!\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z)(?![0-9]+\Z)[./0-9A-Za-z]{13}\Z'
-    WORDPRESS = r'(?i)\A\$P\$[./0-9A-Za-z]{31}\Z'
+    SHA224_GENERIC = r'(?i)\A[0-9a-f]{56}\Z'
+    SHA256_GENERIC = r'(?i)\A[0-9a-f]{64}\Z'
+    SHA384_GENERIC = r'(?i)\A[0-9a-f]{96}\Z'
+    SHA512_GENERIC = r'(?i)\A[0-9a-f]{128}\Z'
+    CRYPT_GENERIC = r'\A(?!\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z)(?![0-9]+\Z)[./0-9A-Za-z]{13}\Z'
+    JOOMLA = r'\A[0-9a-f]{32}:\w{32}\Z'
+    WORDPRESS = r'\A\$P\$[./0-9a-zA-Z]{31}\Z'
+    APACHE_MD5_CRYPT = r'\A\$apr1\$.{1,8}\$[./a-zA-Z0-9]+\Z'
+    UNIX_MD5_CRYPT = r'\A\$1\$.{1,8}\$[./a-zA-Z0-9]+\Z'
+    APACHE_SHA1 = r'\A\{SHA\}[a-zA-Z0-9+/]+={0,2}\Z'
+    VBULLETIN = r'\A[0-9a-fA-F]{32}:.{30}\Z'
+    VBULLETIN_OLD = r'\A[0-9a-fA-F]{32}:.{3}\Z'
+    SSHA = r'\A\{SSHA\}[a-zA-Z0-9+/]+={0,2}\Z'
+    SSHA256 = r'\A\{SSHA256\}[a-zA-Z0-9+/]+={0,2}\Z'
+    SSHA512 = r'\A\{SSHA512\}[a-zA-Z0-9+/]+={0,2}\Z'
+    DJANGO_MD5 = r'\Amd5\$[^$]+\$[0-9a-f]{32}\Z'
+    DJANGO_SHA1 = r'\Asha1\$[^$]+\$[0-9a-f]{40}\Z'
+    MD5_BASE64 = r'\A[a-zA-Z0-9+/]{22}==\Z'
+    SHA1_BASE64 = r'\A[a-zA-Z0-9+/]{27}=\Z'
+    SHA256_BASE64 = r'\A[a-zA-Z0-9+/]{43}=\Z'
+    SHA512_BASE64 = r'\A[a-zA-Z0-9+/]{86}==\Z'
 
 # Reference: http://www.zytrax.com/tech/web/mobile_ids.html
 class MOBILES:
@@ -135,8 +164,14 @@ class MOBILES:
 
 class PROXY_TYPE:
     HTTP = "HTTP"
+    HTTPS = "HTTPS"
     SOCKS4 = "SOCKS4"
     SOCKS5 = "SOCKS5"
+
+class REGISTRY_OPERATION:
+    READ = "read"
+    ADD = "add"
+    DELETE = "delete"
 
 class DUMP_FORMAT:
     CSV = "CSV"
@@ -156,24 +191,40 @@ class HTTP_HEADER:
     CONTENT_RANGE = "Content-Range"
     CONTENT_TYPE = "Content-Type"
     COOKIE = "Cookie"
-    SET_COOKIE = "Set-Cookie"
+    EXPIRES = "Expires"
     HOST = "Host"
+    IF_MODIFIED_SINCE = "If-Modified-Since"
+    LAST_MODIFIED = "Last-Modified"
+    LOCATION = "Location"
     PRAGMA = "Pragma"
     PROXY_AUTHORIZATION = "Proxy-Authorization"
     PROXY_CONNECTION = "Proxy-Connection"
     RANGE = "Range"
     REFERER = "Referer"
+    REFRESH = "Refresh"  # Reference: http://stackoverflow.com/a/283794
     SERVER = "Server"
-    USER_AGENT = "User-Agent"
+    SET_COOKIE = "Set-Cookie"
     TRANSFER_ENCODING = "Transfer-Encoding"
+    URI = "URI"
+    USER_AGENT = "User-Agent"
     VIA = "Via"
+    X_POWERED_BY = "X-Powered-By"
+    X_DATA_ORIGIN = "X-Data-Origin"
 
 class EXPECTED:
     BOOL = "bool"
     INT = "int"
 
+class OPTION_TYPE:
+    BOOLEAN = "boolean"
+    INTEGER = "integer"
+    FLOAT = "float"
+    STRING = "string"
+
 class HASHDB_KEYS:
     DBMS = "DBMS"
+    DBMS_FORK = "DBMS_FORK"
+    CHECK_WAF_RESULT = "CHECK_WAF_RESULT"
     CONF_TMP_PATH = "CONF_TMP_PATH"
     KB_ABS_FILE_PATHS = "KB_ABS_FILE_PATHS"
     KB_BRUTE_COLUMNS = "KB_BRUTE_COLUMNS"
@@ -181,6 +232,7 @@ class HASHDB_KEYS:
     KB_CHARS = "KB_CHARS"
     KB_DYNAMIC_MARKINGS = "KB_DYNAMIC_MARKINGS"
     KB_INJECTIONS = "KB_INJECTIONS"
+    KB_ERROR_CHUNK_LENGTH = "KB_ERROR_CHUNK_LENGTH"
     KB_XP_CMDSHELL_AVAILABLE = "KB_XP_CMDSHELL_AVAILABLE"
     OS = "OS"
 
@@ -190,40 +242,40 @@ class REDIRECTION:
 
 class PAYLOAD:
     SQLINJECTION = {
-                        1: "boolean-based blind",
-                        2: "error-based",
-                        3: "UNION query",
-                        4: "stacked queries",
-                        5: "AND/OR time-based blind",
-                        6: "inline query",
-                   }
+        1: "boolean-based blind",
+        2: "error-based",
+        3: "inline query",
+        4: "stacked queries",
+        5: "AND/OR time-based blind",
+        6: "UNION query",
+    }
 
     PARAMETER = {
-                    1: "Unescaped numeric",
-                    2: "Single quoted string",
-                    3: "LIKE single quoted string",
-                    4: "Double quoted string",
-                    5: "LIKE double quoted string",
-                }
+        1: "Unescaped numeric",
+        2: "Single quoted string",
+        3: "LIKE single quoted string",
+        4: "Double quoted string",
+        5: "LIKE double quoted string",
+    }
 
     RISK = {
-                0: "No risk",
-                1: "Low risk",
-                2: "Medium risk",
-                3: "High risk",
-           }
+        0: "No risk",
+        1: "Low risk",
+        2: "Medium risk",
+        3: "High risk",
+    }
 
     CLAUSE = {
-                0: "Always",
-                1: "WHERE",
-                2: "GROUP BY",
-                3: "ORDER BY",
-                4: "LIMIT",
-                5: "OFFSET",
-                6: "TOP",
-                7: "Table name",
-                8: "Column name",
-             }
+        0: "Always",
+        1: "WHERE",
+        2: "GROUP BY",
+        3: "ORDER BY",
+        4: "LIMIT",
+        5: "OFFSET",
+        6: "TOP",
+        7: "Table name",
+        8: "Column name",
+    }
 
     class METHOD:
         COMPARISON = "comparison"
@@ -234,10 +286,10 @@ class PAYLOAD:
     class TECHNIQUE:
         BOOLEAN = 1
         ERROR = 2
-        UNION = 3
+        QUERY = 3
         STACKED = 4
         TIME = 5
-        QUERY = 6
+        UNION = 6
 
     class WHERE:
         ORIGINAL = 1
@@ -261,59 +313,32 @@ class WEB_API:
     JSP = "jsp"
 
 class CONTENT_TYPE:
-    TECHNIQUES = 0
-    DBMS_FINGERPRINT = 1
-    BANNER = 2
-    CURRENT_USER = 3
-    CURRENT_DB = 4
-    HOSTNAME = 5
-    IS_DBA = 6
-    USERS = 7
-    PASSWORDS = 8
-    PRIVILEGES = 9
-    ROLES = 10
-    DBS = 11
-    TABLES = 12
-    COLUMNS = 13
-    SCHEMA = 14
-    COUNT = 15
-    DUMP_TABLE = 16
-    SEARCH = 17
-    SQL_QUERY = 18
-    COMMON_TABLES = 19
-    COMMON_COLUMNS = 20
-    FILE_READ = 21
-    FILE_WRITE = 22
-    OS_CMD = 23
-    REG_READ = 24
-
-PART_RUN_CONTENT_TYPES = {
-    "checkDbms": CONTENT_TYPE.TECHNIQUES,
-    "getFingerprint": CONTENT_TYPE.DBMS_FINGERPRINT,
-    "getBanner": CONTENT_TYPE.BANNER,
-    "getCurrentUser": CONTENT_TYPE.CURRENT_USER,
-    "getCurrentDb": CONTENT_TYPE.CURRENT_DB,
-    "getHostname": CONTENT_TYPE.HOSTNAME,
-    "isDba": CONTENT_TYPE.IS_DBA,
-    "getUsers": CONTENT_TYPE.USERS,
-    "getPasswordHashes": CONTENT_TYPE.PASSWORDS,
-    "getPrivileges": CONTENT_TYPE.PRIVILEGES,
-    "getRoles": CONTENT_TYPE.ROLES,
-    "getDbs": CONTENT_TYPE.DBS,
-    "getTables": CONTENT_TYPE.TABLES,
-    "getColumns": CONTENT_TYPE.COLUMNS,
-    "getSchema": CONTENT_TYPE.SCHEMA,
-    "getCount": CONTENT_TYPE.COUNT,
-    "dumpTable": CONTENT_TYPE.DUMP_TABLE,
-    "search": CONTENT_TYPE.SEARCH,
-    "sqlQuery": CONTENT_TYPE.SQL_QUERY,
-    "tableExists": CONTENT_TYPE.COMMON_TABLES,
-    "columnExists": CONTENT_TYPE.COMMON_COLUMNS,
-    "readFile": CONTENT_TYPE.FILE_READ,
-    "writeFile": CONTENT_TYPE.FILE_WRITE,
-    "osCmd": CONTENT_TYPE.OS_CMD,
-    "regRead": CONTENT_TYPE.REG_READ
-}
+    TARGET = 0
+    TECHNIQUES = 1
+    DBMS_FINGERPRINT = 2
+    BANNER = 3
+    CURRENT_USER = 4
+    CURRENT_DB = 5
+    HOSTNAME = 6
+    IS_DBA = 7
+    USERS = 8
+    PASSWORDS = 9
+    PRIVILEGES = 10
+    ROLES = 11
+    DBS = 12
+    TABLES = 13
+    COLUMNS = 14
+    SCHEMA = 15
+    COUNT = 16
+    DUMP_TABLE = 17
+    SEARCH = 18
+    SQL_QUERY = 19
+    COMMON_TABLES = 20
+    COMMON_COLUMNS = 21
+    FILE_READ = 22
+    FILE_WRITE = 23
+    OS_CMD = 24
+    REG_READ = 25
 
 class CONTENT_STATUS:
     IN_PROGRESS = 0
@@ -323,4 +348,29 @@ class AUTH_TYPE:
     BASIC = "basic"
     DIGEST = "digest"
     NTLM = "ntlm"
-    CERT = "cert"
+    PKI = "pki"
+
+class AUTOCOMPLETE_TYPE:
+    SQL = 0
+    OS = 1
+    SQLMAP = 2
+    API = 3
+
+class NOTE:
+    FALSE_POSITIVE_OR_UNEXPLOITABLE = "false positive or unexploitable"
+
+class MKSTEMP_PREFIX:
+    HASHES = "sqlmaphashes-"
+    CRAWLER = "sqlmapcrawler-"
+    IPC = "sqlmapipc-"
+    CONFIG = "sqlmapconfig-"
+    TESTING = "sqlmaptesting-"
+    RESULTS = "sqlmapresults-"
+    COOKIE_JAR = "sqlmapcookiejar-"
+    BIG_ARRAY = "sqlmapbigarray-"
+    SPECIFIC_RESPONSE = "sqlmapresponse-"
+
+class TIMEOUT_STATE:
+    NORMAL = 0
+    EXCEPTION = 1
+    TIMEOUT = 2

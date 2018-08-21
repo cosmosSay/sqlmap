@@ -1,14 +1,12 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import copy
 import types
-
-from lib.core.exception import SqlmapDataException
 
 class AttribDict(dict):
     """
@@ -43,7 +41,7 @@ class AttribDict(dict):
         try:
             return self.__getitem__(item)
         except KeyError:
-            raise SqlmapDataException("unable to access item '%s'" % item)
+            raise AttributeError("unable to access item '%s'" % item)
 
     def __setattr__(self, item, value):
         """
@@ -75,7 +73,7 @@ class AttribDict(dict):
         for attr in dir(self):
             if not attr.startswith('_'):
                 value = getattr(self, attr)
-                if not isinstance(value, (types.BuiltinFunctionType, types.BuiltinFunctionType, types.FunctionType, types.MethodType)):
+                if not isinstance(value, (types.BuiltinFunctionType, types.FunctionType, types.MethodType)):
                     setattr(retVal, attr, copy.deepcopy(value, memo))
 
         for key, value in self.items():
@@ -93,6 +91,7 @@ class InjectionDict(AttribDict):
         self.prefix = None
         self.suffix = None
         self.clause = None
+        self.notes = []  # Note: https://github.com/sqlmapproject/sqlmap/issues/1888
 
         # data is a dict with various stype, each which is a dict with
         # all the information specific for that stype

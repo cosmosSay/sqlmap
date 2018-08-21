@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import re
@@ -21,10 +21,12 @@ from lib.core.settings import DEFAULT_PAGE_ENCODING
 from lib.core.settings import DIFF_TOLERANCE
 from lib.core.settings import HTML_TITLE_REGEX
 from lib.core.settings import MIN_RATIO
+from lib.core.settings import MAX_DIFFLIB_SEQUENCE_LENGTH
 from lib.core.settings import MAX_RATIO
 from lib.core.settings import REFLECTED_VALUE_MARKER
 from lib.core.settings import LOWER_RATIO_BOUND
 from lib.core.settings import UPPER_RATIO_BOUND
+from lib.core.settings import URI_HTTP_HEADER
 from lib.core.threads import getCurrentThreadData
 
 def comparison(page, headers, code=None, getRatioValue=False, pageLength=None):
@@ -47,17 +49,15 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
     threadData = getCurrentThreadData()
 
     if kb.testMode:
-        threadData.lastComparisonHeaders = listToStrValue(headers.headers) if headers else ""
+        threadData.lastComparisonHeaders = listToStrValue(_ for _ in headers.headers if not _.startswith("%s:" % URI_HTTP_HEADER)) if headers else ""
         threadData.lastComparisonPage = page
+        threadData.lastComparisonCode = code
 
     if page is None and pageLength is None:
         return None
 
-    seqMatcher = threadData.seqMatcher
-    seqMatcher.set_seq1(kb.pageTemplate)
-
     if any((conf.string, conf.notString, conf.regexp)):
-        rawResponse = "%s%s" % (listToStrValue(headers.headers) if headers else "", page)
+        rawResponse = "%s%s" % (listToStrValue(_ for _ in headers.headers if not _.startswith("%s:" % URI_HTTP_HEADER)) if headers else "", page)
 
         # String to match in page when the query is True and/or valid
         if conf.string:
@@ -75,9 +75,12 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
     if conf.code:
         return conf.code == code
 
+    seqMatcher = threadData.seqMatcher
+    seqMatcher.set_seq1(kb.pageTemplate)
+
     if page:
         # In case of an DBMS error page return None
-        if kb.errorIsNone and (wasLastResponseDBMSError() or wasLastResponseHTTPError()):
+        if kb.errorIsNone and (wasLastResponseDBMSError() or wasLastResponseHTTPError()) and not kb.negativeLogic:
             return None
 
         # Dynamic content lines to be excluded before comparison
@@ -103,39 +106,41 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
         # Preventing "Unicode equal comparison failed to convert both arguments to Unicode"
         # (e.g. if one page is PDF and the other is HTML)
         if isinstance(seqMatcher.a, str) and isinstance(page, unicode):
-            page = page.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, 'ignore')
+            page = page.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore")
         elif isinstance(seqMatcher.a, unicode) and isinstance(page, str):
-            seqMatcher.a = seqMatcher.a.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, 'ignore')
+            seqMatcher.a = seqMatcher.a.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore")
 
-        seq1, seq2 = None, None
-
-        if conf.titles:
-            seq1 = extractRegexResult(HTML_TITLE_REGEX, seqMatcher.a)
-            seq2 = extractRegexResult(HTML_TITLE_REGEX, page)
-        else:
-            seq1 = getFilteredPageContent(seqMatcher.a, True) if conf.textOnly else seqMatcher.a
-            seq2 = getFilteredPageContent(page, True) if conf.textOnly else page
-
-        if seq1 is None or seq2 is None:
+        if any(_ is None for _ in (page, seqMatcher.a)):
             return None
-
-        seq1 = seq1.replace(REFLECTED_VALUE_MARKER, "")
-        seq2 = seq2.replace(REFLECTED_VALUE_MARKER, "")
-
-        count = 0
-        while count < min(len(seq1), len(seq2)):
-            if seq1[count] == seq2[count]:
-                count += 1
+        elif seqMatcher.a and page and seqMatcher.a == page:
+            ratio = 1.
+        elif kb.skipSeqMatcher or seqMatcher.a and page and any(len(_) > MAX_DIFFLIB_SEQUENCE_LENGTH for _ in (seqMatcher.a, page)):
+            if not page or not seqMatcher.a:
+                return float(seqMatcher.a == page)
             else:
-                break
-        if count:
-            seq1 = seq1[count:]
-            seq2 = seq2[count:]
+                ratio = 1. * len(seqMatcher.a) / len(page)
+                if ratio > 1:
+                    ratio = 1. / ratio
+        else:
+            seq1, seq2 = None, None
 
-        seqMatcher.set_seq1(seq1)
-        seqMatcher.set_seq2(seq2)
+            if conf.titles:
+                seq1 = extractRegexResult(HTML_TITLE_REGEX, seqMatcher.a)
+                seq2 = extractRegexResult(HTML_TITLE_REGEX, page)
+            else:
+                seq1 = getFilteredPageContent(seqMatcher.a, True) if conf.textOnly else seqMatcher.a
+                seq2 = getFilteredPageContent(page, True) if conf.textOnly else page
 
-        ratio = round(seqMatcher.quick_ratio(), 3)
+            if seq1 is None or seq2 is None:
+                return None
+
+            seq1 = seq1.replace(REFLECTED_VALUE_MARKER, "")
+            seq2 = seq2.replace(REFLECTED_VALUE_MARKER, "")
+
+            seqMatcher.set_seq1(seq1)
+            seqMatcher.set_seq2(seq2)
+
+            ratio = round(seqMatcher.quick_ratio(), 3)
 
     # If the url is stable and we did not set yet the match ratio and the
     # current injected value changes the url page content
@@ -144,6 +149,9 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
             kb.matchRatio = ratio
             logger.debug("setting match ratio for current parameter to %.3f" % kb.matchRatio)
 
+    if kb.testMode:
+        threadData.lastComparisonRatio = ratio
+
     # If it has been requested to return the ratio and not a comparison
     # response
     if getRatioValue:
@@ -151,6 +159,9 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
 
     elif ratio > UPPER_RATIO_BOUND:
         return True
+
+    elif ratio < LOWER_RATIO_BOUND:
+        return False
 
     elif kb.matchRatio is None:
         return None

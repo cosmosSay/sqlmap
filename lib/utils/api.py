@@ -1,22 +1,29 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
+import contextlib
+import httplib
 import logging
 import os
-import shutil
+import re
+import shlex
+import socket
 import sqlite3
 import sys
 import tempfile
 import time
+import urllib2
 
-from subprocess import PIPE
-
+from lib.core.common import dataToStdout
+from lib.core.common import getSafeExString
+from lib.core.common import saveConfig
 from lib.core.common import unArrayizeValue
-from lib.core.convert import base64pickle
+from lib.core.convert import base64encode
 from lib.core.convert import hexencode
 from lib.core.convert import dejsonize
 from lib.core.convert import jsonize
@@ -26,76 +33,85 @@ from lib.core.data import paths
 from lib.core.data import logger
 from lib.core.datatype import AttribDict
 from lib.core.defaults import _defaults
+from lib.core.dicts import PART_RUN_CONTENT_TYPES
+from lib.core.enums import AUTOCOMPLETE_TYPE
 from lib.core.enums import CONTENT_STATUS
-from lib.core.enums import PART_RUN_CONTENT_TYPES
+from lib.core.enums import MKSTEMP_PREFIX
+from lib.core.exception import SqlmapConnectionException
 from lib.core.log import LOGGER_HANDLER
 from lib.core.optiondict import optDict
+from lib.core.settings import RESTAPI_DEFAULT_ADAPTER
+from lib.core.settings import IS_WIN
+from lib.core.settings import RESTAPI_DEFAULT_ADDRESS
+from lib.core.settings import RESTAPI_DEFAULT_PORT
+from lib.core.shell import autoCompletion
 from lib.core.subprocessng import Popen
-from lib.core.subprocessng import send_all
-from lib.core.subprocessng import recv_some
-from thirdparty.bottle.bottle import abort
-from thirdparty.bottle.bottle import error
+from lib.parse.cmdline import cmdLineParser
+from thirdparty.bottle.bottle import error as return_error
 from thirdparty.bottle.bottle import get
 from thirdparty.bottle.bottle import hook
 from thirdparty.bottle.bottle import post
 from thirdparty.bottle.bottle import request
 from thirdparty.bottle.bottle import response
 from thirdparty.bottle.bottle import run
-from thirdparty.bottle.bottle import static_file
+from thirdparty.bottle.bottle import server_names
 
-RESTAPI_SERVER_HOST = "127.0.0.1"
-RESTAPI_SERVER_PORT = 8775
-
-# Local global variables
-adminid = ""
-db = None
-db_filepath = None
-tasks = dict()
+# Global data storage
+class DataStore(object):
+    admin_id = ""
+    current_db = None
+    tasks = dict()
+    username = None
+    password = None
 
 # API objects
 class Database(object):
-    global db_filepath
-
-    LOGS_TABLE = "CREATE TABLE logs(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, time TEXT, level TEXT, message TEXT)"
-    DATA_TABLE = "CREATE TABLE data(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, status INTEGER, content_type INTEGER, value TEXT)"
-    ERRORS_TABLE = "CREATE TABLE errors(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, error TEXT)"
+    filepath = None
 
     def __init__(self, database=None):
-        if database:
-            self.database = database
-        else:
-            self.database = db_filepath
+        self.database = self.filepath if database is None else database
+        self.connection = None
+        self.cursor = None
 
     def connect(self, who="server"):
-        self.connection = sqlite3.connect(self.database, timeout=3, isolation_level=None)
+        self.connection = sqlite3.connect(self.database, timeout=3, isolation_level=None, check_same_thread=False)
         self.cursor = self.connection.cursor()
         logger.debug("REST-JSON API %s connected to IPC database" % who)
 
     def disconnect(self):
-        self.cursor.close()
-        self.connection.close()
+        if self.cursor:
+            self.cursor.close()
+
+        if self.connection:
+            self.connection.close()
 
     def commit(self):
-        self.cursor.commit()
+        self.connection.commit()
 
     def execute(self, statement, arguments=None):
-        if arguments:
-            self.cursor.execute(statement, arguments)
-        else:
-            self.cursor.execute(statement)
+        while True:
+            try:
+                if arguments:
+                    self.cursor.execute(statement, arguments)
+                else:
+                    self.cursor.execute(statement)
+            except sqlite3.OperationalError, ex:
+                if "locked" not in getSafeExString(ex):
+                    raise
+            else:
+                break
 
         if statement.lstrip().upper().startswith("SELECT"):
             return self.cursor.fetchall()
 
     def init(self):
-        self.execute(self.LOGS_TABLE)
-        self.execute(self.DATA_TABLE)
-        self.execute(self.ERRORS_TABLE)
+        self.execute("CREATE TABLE logs(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, time TEXT, level TEXT, message TEXT)")
+        self.execute("CREATE TABLE data(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, status INTEGER, content_type INTEGER, value TEXT)")
+        self.execute("CREATE TABLE errors(id INTEGER PRIMARY KEY AUTOINCREMENT, taskid INTEGER, error TEXT)")
 
 class Task(object):
-    global db_filepath
-
-    def __init__(self, taskid):
+    def __init__(self, taskid, remote_addr):
+        self.remote_addr = remote_addr
         self.process = None
         self.output_directory = None
         self.options = None
@@ -111,10 +127,11 @@ class Task(object):
                 type_ = unArrayizeValue(type_)
                 self.options[name] = _defaults.get(name, datatype[type_])
 
-        # Let sqlmap engine knows it is getting called by the API, the task ID and the file path of the IPC database
+        # Let sqlmap engine knows it is getting called by the API,
+        # the task ID and the file path of the IPC database
         self.options.api = True
         self.options.taskid = taskid
-        self.options.database = db_filepath
+        self.options.database = Database.filepath
 
         # Enforce batch mode and disable coloring and ETA
         self.options.batch = True
@@ -135,29 +152,38 @@ class Task(object):
     def reset_options(self):
         self.options = AttribDict(self._original_options)
 
-    def set_output_directory(self):
-        if not self.output_directory or not os.path.isdir(self.output_directory):
-            self.output_directory = tempfile.mkdtemp(prefix="sqlmapoutput-")
-            self.set_option("oDir", self.output_directory)
-
-    def clean_filesystem(self):
-        if self.output_directory:
-            shutil.rmtree(self.output_directory)
-
     def engine_start(self):
-        self.process = Popen("python sqlmap.py --pickled-options %s" % base64pickle(self.options), shell=True, stdin=PIPE, close_fds=False)
+        handle, configFile = tempfile.mkstemp(prefix=MKSTEMP_PREFIX.CONFIG, text=True)
+        os.close(handle)
+        saveConfig(self.options, configFile)
+
+        if os.path.exists("sqlmap.py"):
+            self.process = Popen(["python", "sqlmap.py", "--api", "-c", configFile], shell=False, close_fds=not IS_WIN)
+        elif os.path.exists(os.path.join(os.getcwd(), "sqlmap.py")):
+            self.process = Popen(["python", "sqlmap.py", "--api", "-c", configFile], shell=False, cwd=os.getcwd(), close_fds=not IS_WIN)
+        elif os.path.exists(os.path.join(os.path.abspath(os.path.dirname(sys.argv[0])), "sqlmap.py")):
+            self.process = Popen(["python", "sqlmap.py", "--api", "-c", configFile], shell=False, cwd=os.path.join(os.path.abspath(os.path.dirname(sys.argv[0]))), close_fds=not IS_WIN)
+        else:
+            self.process = Popen(["sqlmap", "--api", "-c", configFile], shell=False, close_fds=not IS_WIN)
 
     def engine_stop(self):
         if self.process:
-            return self.process.terminate()
+            self.process.terminate()
+            return self.process.wait()
         else:
             return None
 
+    def engine_process(self):
+        return self.process
+
     def engine_kill(self):
         if self.process:
-            return self.process.kill()
-        else:
-            return None
+            try:
+                self.process.kill()
+                return self.process.wait()
+            except:
+                pass
+        return None
 
     def engine_get_id(self):
         if self.process:
@@ -166,8 +192,11 @@ class Task(object):
             return None
 
     def engine_get_returncode(self):
-        self.process.poll()
-        return self.process.returncode
+        if self.process:
+            self.process.poll()
+            return self.process.returncode
+        else:
+            return None
 
     def engine_has_terminated(self):
         return isinstance(self.engine_get_returncode(), int)
@@ -194,32 +223,26 @@ class StdDbOut(object):
                     # Ignore all non-relevant messages
                     return
 
-            output = conf.database_cursor.execute("SELECT id, status, value FROM data WHERE taskid = ? AND content_type = ?",
-                                                  (self.taskid, content_type))
-
-            #print >>sys.__stdout__, "output: %s\nvalue: %s\nstatus: %d\ncontent_type: %d\nkb.partRun: %s\n--------------" % (output, value, status, content_type, kb.partRun)
+            output = conf.databaseCursor.execute("SELECT id, status, value FROM data WHERE taskid = ? AND content_type = ?", (self.taskid, content_type))
 
             # Delete partial output from IPC database if we have got a complete output
             if status == CONTENT_STATUS.COMPLETE:
                 if len(output) > 0:
-                    for index in xrange(0, len(output)):
-                        conf.database_cursor.execute("DELETE FROM data WHERE id = ?", (output[index][0],))
+                    for index in xrange(len(output)):
+                        conf.databaseCursor.execute("DELETE FROM data WHERE id = ?", (output[index][0],))
 
-                conf.database_cursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)", (self.taskid, status, content_type, jsonize(value)))
+                conf.databaseCursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)", (self.taskid, status, content_type, jsonize(value)))
                 if kb.partRun:
                     kb.partRun = None
 
             elif status == CONTENT_STATUS.IN_PROGRESS:
                 if len(output) == 0:
-                    conf.database_cursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)",
-                                                 (self.taskid, status, content_type, jsonize(value)))
+                    conf.databaseCursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)", (self.taskid, status, content_type, jsonize(value)))
                 else:
                     new_value = "%s%s" % (dejsonize(output[0][2]), value)
-                    conf.database_cursor.execute("UPDATE data SET value = ? WHERE id = ?",
-                                                 (jsonize(new_value), output[0][0]))
+                    conf.databaseCursor.execute("UPDATE data SET value = ? WHERE id = ?", (jsonize(new_value), output[0][0]))
         else:
-            conf.database_cursor.execute("INSERT INTO errors VALUES(NULL, ?, ?)",
-                                         (self.taskid, str(value) if value else ""))
+            conf.databaseCursor.execute("INSERT INTO errors VALUES(NULL, ?, ?)", (self.taskid, str(value) if value else ""))
 
     def flush(self):
         pass
@@ -236,14 +259,15 @@ class LogRecorder(logging.StreamHandler):
         Record emitted events to IPC database for asynchronous I/O
         communication with the parent process
         """
-        conf.database_cursor.execute("INSERT INTO logs VALUES(NULL, ?, ?, ?, ?)",
-                                     (conf.taskid, time.strftime("%X"), record.levelname,
-                                     record.msg % record.args if record.args else record.msg))
+        conf.databaseCursor.execute("INSERT INTO logs VALUES(NULL, ?, ?, ?, ?)", (conf.taskid, time.strftime("%X"), record.levelname, record.msg % record.args if record.args else record.msg))
 
 def setRestAPILog():
-    if hasattr(conf, "api"):
-        conf.database_cursor = Database(conf.database)
-        conf.database_cursor.connect("client")
+    if conf.api:
+        try:
+            conf.databaseCursor = Database(conf.database)
+            conf.databaseCursor.connect("client")
+        except sqlite3.OperationalError, ex:
+            raise SqlmapConnectionException("%s ('%s')" % (ex, conf.database))
 
         # Set a logging handler that writes log messages to a IPC database
         logger.removeHandler(LOGGER_HANDLER)
@@ -252,11 +276,30 @@ def setRestAPILog():
 
 # Generic functions
 def is_admin(taskid):
-    global adminid
-    if adminid != taskid:
-        return False
+    return DataStore.admin_id == taskid
+
+@hook('before_request')
+def check_authentication():
+    if not any((DataStore.username, DataStore.password)):
+        return
+
+    authorization = request.headers.get("Authorization", "")
+    match = re.search(r"(?i)\ABasic\s+([^\s]+)", authorization)
+
+    if not match:
+        request.environ["PATH_INFO"] = "/error/401"
+
+    try:
+        creds = match.group(1).decode("base64")
+    except:
+        request.environ["PATH_INFO"] = "/error/401"
     else:
-        return True
+        if creds.count(':') != 1:
+            request.environ["PATH_INFO"] = "/error/401"
+        else:
+            username, password = creds.split(':')
+            if username.strip() != (DataStore.username or "") or password.strip() != (DataStore.password or ""):
+                request.environ["PATH_INFO"] = "/error/401"
 
 @hook("after_request")
 def security_headers(json_header=True):
@@ -270,6 +313,7 @@ def security_headers(json_header=True):
     response.headers["Pragma"] = "no-cache"
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Expires"] = "0"
+
     if json_header:
         response.content_type = "application/json; charset=UTF-8"
 
@@ -277,25 +321,34 @@ def security_headers(json_header=True):
 # HTTP Status Code functions #
 ##############################
 
-@error(401)  # Access Denied
+@return_error(401)  # Access Denied
 def error401(error=None):
     security_headers(False)
     return "Access denied"
 
-@error(404)  # Not Found
+@return_error(404)  # Not Found
 def error404(error=None):
     security_headers(False)
     return "Nothing here"
 
-@error(405)  # Method Not Allowed (e.g. when requesting a POST method via GET)
+@return_error(405)  # Method Not Allowed (e.g. when requesting a POST method via GET)
 def error405(error=None):
     security_headers(False)
     return "Method not allowed"
 
-@error(500)  # Internal Server Error
+@return_error(500)  # Internal Server Error
 def error500(error=None):
     security_headers(False)
     return "Internal server error"
+
+#############
+# Auxiliary #
+#############
+
+@get('/error/401')
+def path_401():
+    response.status = 401
+    return response
 
 #############################
 # Task management functions #
@@ -307,59 +360,59 @@ def task_new():
     """
     Create new task ID
     """
-    global tasks
-
     taskid = hexencode(os.urandom(8))
-    tasks[taskid] = Task(taskid)
+    remote_addr = request.remote_addr
 
-    logger.debug("Created new task ID: %s" % taskid)
-    return jsonize({"taskid": taskid})
+    DataStore.tasks[taskid] = Task(taskid, remote_addr)
+
+    logger.debug("Created new task: '%s'" % taskid)
+    return jsonize({"success": True, "taskid": taskid})
 
 @get("/task/<taskid>/delete")
 def task_delete(taskid):
     """
     Delete own task ID
     """
-    if taskid in tasks:
-        tasks[taskid].clean_filesystem()
-        tasks.pop(taskid)
+    if taskid in DataStore.tasks:
+        DataStore.tasks.pop(taskid)
 
-        logger.debug("Deleted task ID: %s" % taskid)
+        logger.debug("[%s] Deleted task" % taskid)
         return jsonize({"success": True})
     else:
-        abort(500, "Invalid task ID")
+        logger.warning("[%s] Invalid task ID provided to task_delete()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
 ###################
 # Admin functions #
 ###################
 
 @get("/admin/<taskid>/list")
-def task_list(taskid):
+def task_list(taskid=None):
     """
     List task pull
     """
-    if is_admin(taskid):
-        logger.debug("Listed task pull")
-        return jsonize({"tasks": tasks, "tasks_num": len(tasks)})
-    else:
-        abort(401)
+    tasks = {}
+
+    for key in DataStore.tasks:
+        if is_admin(taskid) or DataStore.tasks[key].remote_addr == request.remote_addr:
+            tasks[key] = dejsonize(scan_status(key))["status"]
+
+    logger.debug("[%s] Listed task pool (%s)" % (taskid, "admin" if is_admin(taskid) else request.remote_addr))
+    return jsonize({"success": True, "tasks": tasks, "tasks_num": len(tasks)})
 
 @get("/admin/<taskid>/flush")
 def task_flush(taskid):
     """
     Flush task spool (delete all tasks)
     """
-    global tasks
 
-    if is_admin(taskid):
-        for task in tasks:
-            tasks[task].clean_filesystem()
+    for key in list(DataStore.tasks):
+        if is_admin(taskid) or DataStore.tasks[key].remote_addr == request.remote_addr:
+            DataStore.tasks[key].engine_kill()
+            del DataStore.tasks[key]
 
-        tasks = dict()
-        logger.debug("Flushed task pull")
-        return jsonize({"success": True})
-    else:
-        abort(401)
+    logger.debug("[%s] Flushed task pool (%s)" % (taskid, "admin" if is_admin(taskid) else request.remote_addr))
+    return jsonize({"success": True})
 
 ##################################
 # sqlmap core interact functions #
@@ -371,41 +424,49 @@ def option_list(taskid):
     """
     List options for a certain task ID
     """
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to option_list()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    return jsonize({"options": tasks[taskid].get_options()})
+    logger.debug("[%s] Listed task options" % taskid)
+    return jsonize({"success": True, "options": DataStore.tasks[taskid].get_options()})
 
 @post("/option/<taskid>/get")
 def option_get(taskid):
     """
     Get the value of an option (command line switch) for a certain task ID
     """
-    global tasks
-
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to option_get()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
     option = request.json.get("option", "")
 
-    if option in tasks[taskid]:
-        return jsonize({option: tasks[taskid].get_option(option)})
+    if option in DataStore.tasks[taskid].options:
+        logger.debug("[%s] Retrieved value for option %s" % (taskid, option))
+        return jsonize({"success": True, option: DataStore.tasks[taskid].get_option(option)})
     else:
-        return jsonize({option: "not set"})
+        logger.debug("[%s] Requested value for unknown option %s" % (taskid, option))
+        return jsonize({"success": False, "message": "Unknown option", option: "not set"})
 
 @post("/option/<taskid>/set")
 def option_set(taskid):
     """
     Set an option (command line switch) for a certain task ID
     """
-    global tasks
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to option_set()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
+
+    if request.json is None:
+        logger.warning("[%s] Invalid JSON options provided to option_set()" % taskid)
+        return jsonize({"success": False, "message": "Invalid JSON options"})
 
     for option, value in request.json.items():
-        tasks[taskid].set_option(option, value)
+        DataStore.tasks[taskid].set_option(option, value)
 
+    logger.debug("[%s] Requested to set options" % taskid)
     return jsonize({"success": True})
 
 # Handle scans
@@ -414,39 +475,38 @@ def scan_start(taskid):
     """
     Launch a scan
     """
-    global tasks
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to scan_start()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    tasks[taskid].reset_options()
+    if request.json is None:
+        logger.warning("[%s] Invalid JSON options provided to scan_start()" % taskid)
+        return jsonize({"success": False, "message": "Invalid JSON options"})
 
     # Initialize sqlmap engine's options with user's provided options, if any
     for option, value in request.json.items():
-        tasks[taskid].set_option(option, value)
-
-    # Overwrite output directory value to a temporary directory
-    tasks[taskid].set_output_directory()
+        DataStore.tasks[taskid].set_option(option, value)
 
     # Launch sqlmap engine in a separate process
-    tasks[taskid].engine_start()
+    DataStore.tasks[taskid].engine_start()
 
-    logger.debug("Started scan for task ID %s" % taskid)
-    return jsonize({"success": True, "engineid": tasks[taskid].engine_get_id()})
+    logger.debug("[%s] Started scan" % taskid)
+    return jsonize({"success": True, "engineid": DataStore.tasks[taskid].engine_get_id()})
 
 @get("/scan/<taskid>/stop")
 def scan_stop(taskid):
     """
     Stop a scan
     """
-    global tasks
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if (taskid not in DataStore.tasks or DataStore.tasks[taskid].engine_process() is None or DataStore.tasks[taskid].engine_has_terminated()):
+        logger.warning("[%s] Invalid task ID provided to scan_stop()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    tasks[taskid].engine_stop()
+    DataStore.tasks[taskid].engine_stop()
 
-    logger.debug("Stopped scan for task ID %s" % taskid)
+    logger.debug("[%s] Stopped scan" % taskid)
     return jsonize({"success": True})
 
 @get("/scan/<taskid>/kill")
@@ -454,14 +514,14 @@ def scan_kill(taskid):
     """
     Kill a scan
     """
-    global tasks
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if (taskid not in DataStore.tasks or DataStore.tasks[taskid].engine_process() is None or DataStore.tasks[taskid].engine_has_terminated()):
+        logger.warning("[%s] Invalid task ID provided to scan_kill()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    tasks[taskid].engine_kill()
+    DataStore.tasks[taskid].engine_kill()
 
-    logger.debug("Killed scan for task ID %s" % taskid)
+    logger.debug("[%s] Killed scan" % taskid)
     return jsonize({"success": True})
 
 @get("/scan/<taskid>/status")
@@ -469,39 +529,46 @@ def scan_status(taskid):
     """
     Returns status of a scan
     """
-    global tasks
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to scan_status()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    status = "terminated" if tasks[taskid].engine_has_terminated() is True else "running"
+    if DataStore.tasks[taskid].engine_process() is None:
+        status = "not running"
+    else:
+        status = "terminated" if DataStore.tasks[taskid].engine_has_terminated() is True else "running"
 
-    logger.debug("Requested status of scan for task ID %s" % taskid)
-    return jsonize({"status": status, "returncode": tasks[taskid].engine_get_returncode()})
+    logger.debug("[%s] Retrieved scan status" % taskid)
+    return jsonize({
+        "success": True,
+        "status": status,
+        "returncode": DataStore.tasks[taskid].engine_get_returncode()
+    })
 
 @get("/scan/<taskid>/data")
 def scan_data(taskid):
     """
     Retrieve the data of a scan
     """
-    global db
-    global tasks
+
     json_data_message = list()
     json_errors_message = list()
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to scan_data()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
     # Read all data from the IPC database for the taskid
-    for status, content_type, value in db.execute("SELECT status, content_type, value FROM data WHERE taskid = ? ORDER BY id ASC", (taskid,)):
+    for status, content_type, value in DataStore.current_db.execute("SELECT status, content_type, value FROM data WHERE taskid = ? ORDER BY id ASC", (taskid,)):
         json_data_message.append({"status": status, "type": content_type, "value": dejsonize(value)})
 
     # Read all error messages from the IPC database
-    for error in db.execute("SELECT error FROM errors WHERE taskid = ? ORDER BY id ASC", (taskid,)):
+    for error in DataStore.current_db.execute("SELECT error FROM errors WHERE taskid = ? ORDER BY id ASC", (taskid,)):
         json_errors_message.append(error)
 
-    logger.debug("Retrieved data and error messages for scan for task ID %s" % taskid)
-    return jsonize({"data": json_data_message, "error": json_errors_message})
+    logger.debug("[%s] Retrieved scan data and error messages" % taskid)
+    return jsonize({"success": True, "data": json_data_message, "error": json_errors_message})
 
 # Functions to handle scans' logs
 @get("/scan/<taskid>/log/<start>/<end>")
@@ -509,44 +576,45 @@ def scan_log_limited(taskid, start, end):
     """
     Retrieve a subset of log messages
     """
-    global db
-    global tasks
+
     json_log_messages = list()
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to scan_log_limited()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
     if not start.isdigit() or not end.isdigit() or end < start:
-        abort(500, "Invalid start or end value, must be digits")
+        logger.warning("[%s] Invalid start or end value provided to scan_log_limited()" % taskid)
+        return jsonize({"success": False, "message": "Invalid start or end value, must be digits"})
 
     start = max(1, int(start))
     end = max(1, int(end))
 
     # Read a subset of log messages from the IPC database
-    for time_, level, message in db.execute("SELECT time, level, message FROM logs WHERE taskid = ? AND id >= ? AND id <= ? ORDER BY id ASC", (taskid, start, end)):
+    for time_, level, message in DataStore.current_db.execute("SELECT time, level, message FROM logs WHERE taskid = ? AND id >= ? AND id <= ? ORDER BY id ASC", (taskid, start, end)):
         json_log_messages.append({"time": time_, "level": level, "message": message})
 
-    logger.debug("Retrieved subset of log messages for scan for task ID %s" % taskid)
-    return jsonize({"log": json_log_messages})
+    logger.debug("[%s] Retrieved scan log messages subset" % taskid)
+    return jsonize({"success": True, "log": json_log_messages})
 
 @get("/scan/<taskid>/log")
 def scan_log(taskid):
     """
     Retrieve the log messages
     """
-    global db
-    global tasks
+
     json_log_messages = list()
 
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to scan_log()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
     # Read all log messages from the IPC database
-    for time_, level, message in db.execute("SELECT time, level, message FROM logs WHERE taskid = ? ORDER BY id ASC", (taskid,)):
+    for time_, level, message in DataStore.current_db.execute("SELECT time, level, message FROM logs WHERE taskid = ? ORDER BY id ASC", (taskid,)):
         json_log_messages.append({"time": time_, "level": level, "message": message})
 
-    logger.debug("Retrieved log messages for scan for task ID %s" % taskid)
-    return jsonize({"log": json_log_messages})
+    logger.debug("[%s] Retrieved scan log messages" % taskid)
+    return jsonize({"success": True, "log": json_log_messages})
 
 # Function to handle files inside the output directory
 @get("/download/<taskid>/<target>/<filename:path>")
@@ -554,53 +622,244 @@ def download(taskid, target, filename):
     """
     Download a certain file from the file system
     """
-    if taskid not in tasks:
-        abort(500, "Invalid task ID")
 
-    # Prevent file path traversal - the lame way
-    if target.startswith("."):
-        abort(500)
+    if taskid not in DataStore.tasks:
+        logger.warning("[%s] Invalid task ID provided to download()" % taskid)
+        return jsonize({"success": False, "message": "Invalid task ID"})
 
-    path = os.path.join(paths.SQLMAP_OUTPUT_PATH, target)
+    path = os.path.abspath(os.path.join(paths.SQLMAP_OUTPUT_PATH, target, filename))
+    # Prevent file path traversal
+    if not path.startswith(paths.SQLMAP_OUTPUT_PATH):
+        logger.warning("[%s] Forbidden path (%s)" % (taskid, target))
+        return jsonize({"success": False, "message": "Forbidden path"})
 
-    if os.path.exists(path):
-        return static_file(filename, root=path)
+    if os.path.isfile(path):
+        logger.debug("[%s] Retrieved content of file %s" % (taskid, target))
+        with open(path, 'rb') as inf:
+            file_content = inf.read()
+        return jsonize({"success": True, "file": base64encode(file_content)})
     else:
-        abort(500, "File does not exist")
+        logger.warning("[%s] File does not exist %s" % (taskid, target))
+        return jsonize({"success": False, "message": "File does not exist"})
 
-def server(host="0.0.0.0", port=RESTAPI_SERVER_PORT):
+def server(host=RESTAPI_DEFAULT_ADDRESS, port=RESTAPI_DEFAULT_PORT, adapter=RESTAPI_DEFAULT_ADAPTER, username=None, password=None):
     """
     REST-JSON API server
     """
-    global adminid
-    global db
-    global db_filepath
 
-    adminid = hexencode(os.urandom(16))
-    db_filepath = tempfile.mkstemp(prefix="sqlmapipc-", text=False)[1]
+    DataStore.admin_id = hexencode(os.urandom(16))
+    DataStore.username = username
+    DataStore.password = password
+
+    _, Database.filepath = tempfile.mkstemp(prefix=MKSTEMP_PREFIX.IPC, text=False)
+    os.close(_)
+
+    if port == 0:  # random
+        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+            s.bind((host, 0))
+            port = s.getsockname()[1]
 
     logger.info("Running REST-JSON API server at '%s:%d'.." % (host, port))
-    logger.info("Admin ID: %s" % adminid)
-    logger.debug("IPC database: %s" % db_filepath)
+    logger.info("Admin ID: %s" % DataStore.admin_id)
+    logger.debug("IPC database: '%s'" % Database.filepath)
 
     # Initialize IPC database
-    db = Database()
-    db.connect()
-    db.init()
+    DataStore.current_db = Database()
+    DataStore.current_db.connect()
+    DataStore.current_db.init()
 
     # Run RESTful API
-    run(host=host, port=port, quiet=True, debug=False)
+    try:
+        # Supported adapters: aiohttp, auto, bjoern, cgi, cherrypy, diesel, eventlet, fapws3, flup, gae, gevent, geventSocketIO, gunicorn, meinheld, paste, rocket, tornado, twisted, waitress, wsgiref
+        # Reference: https://bottlepy.org/docs/dev/deployment.html || bottle.server_names
 
-def client(host=RESTAPI_SERVER_HOST, port=RESTAPI_SERVER_PORT):
+        if adapter == "gevent":
+            from gevent import monkey
+            monkey.patch_all()
+        elif adapter == "eventlet":
+            import eventlet
+            eventlet.monkey_patch()
+        logger.debug("Using adapter '%s' to run bottle" % adapter)
+        run(host=host, port=port, quiet=True, debug=True, server=adapter)
+    except socket.error, ex:
+        if "already in use" in getSafeExString(ex):
+            logger.error("Address already in use ('%s:%s')" % (host, port))
+        else:
+            raise
+    except ImportError:
+        if adapter.lower() not in server_names:
+            errMsg = "Adapter '%s' is unknown. " % adapter
+            errMsg += "List of supported adapters: %s" % ', '.join(sorted(server_names.keys()))
+        else:
+            errMsg = "Server support for adapter '%s' is not installed on this system " % adapter
+            errMsg += "(Note: you can try to install it with 'sudo apt-get install python-%s' or 'sudo pip install %s')" % (adapter, adapter)
+        logger.critical(errMsg)
+
+def _client(url, options=None):
+    logger.debug("Calling %s" % url)
+    try:
+        data = None
+        if options is not None:
+            data = jsonize(options)
+        headers = {"Content-Type": "application/json"}
+
+        if DataStore.username or DataStore.password:
+            headers["Authorization"] = "Basic %s" % base64encode("%s:%s" % (DataStore.username or "", DataStore.password or ""))
+
+        req = urllib2.Request(url, data, headers)
+        response = urllib2.urlopen(req)
+        text = response.read()
+    except:
+        if options:
+            logger.error("Failed to load and parse %s" % url)
+        raise
+    return text
+
+def client(host=RESTAPI_DEFAULT_ADDRESS, port=RESTAPI_DEFAULT_PORT, username=None, password=None):
     """
     REST-JSON API client
     """
+
+    DataStore.username = username
+    DataStore.password = password
+
+    dbgMsg = "Example client access from command line:"
+    dbgMsg += "\n\t$ taskid=$(curl http://%s:%d/task/new 2>1 | grep -o -I '[a-f0-9]\{16\}') && echo $taskid" % (host, port)
+    dbgMsg += "\n\t$ curl -H \"Content-Type: application/json\" -X POST -d '{\"url\": \"http://testphp.vulnweb.com/artists.php?artist=1\"}' http://%s:%d/scan/$taskid/start" % (host, port)
+    dbgMsg += "\n\t$ curl http://%s:%d/scan/$taskid/data" % (host, port)
+    dbgMsg += "\n\t$ curl http://%s:%d/scan/$taskid/log" % (host, port)
+    logger.debug(dbgMsg)
+
     addr = "http://%s:%d" % (host, port)
     logger.info("Starting REST-JSON API client to '%s'..." % addr)
 
-    # TODO: write a simple client with requests, for now use curl from command line
-    logger.error("Not yet implemented, use curl from command line instead for now, for example:")
-    print "\n\t$ curl http://%s:%d/task/new" % (host, port)
-    print "\t$ curl -H \"Content-Type: application/json\" -X POST -d '{\"url\": \"http://testphp.vulnweb.com/artists.php?artist=1\"}' http://%s:%d/scan/:taskid/start" % (host, port)
-    print "\t$ curl http://%s:%d/scan/:taskid/data" % (host, port)
-    print "\t$ curl http://%s:%d/scan/:taskid/log\n" % (host, port)
+    try:
+        _client(addr)
+    except Exception, ex:
+        if not isinstance(ex, urllib2.HTTPError) or ex.code == httplib.UNAUTHORIZED:
+            errMsg = "There has been a problem while connecting to the "
+            errMsg += "REST-JSON API server at '%s' " % addr
+            errMsg += "(%s)" % ex
+            logger.critical(errMsg)
+            return
+
+    commands = ("help", "new", "use", "data", "log", "status", "option", "stop", "kill", "list", "flush", "exit", "bye", "quit")
+    autoCompletion(AUTOCOMPLETE_TYPE.API, commands=commands)
+
+    taskid = None
+    logger.info("Type 'help' or '?' for list of available commands")
+
+    while True:
+        try:
+            command = raw_input("api%s> " % (" (%s)" % taskid if taskid else "")).strip()
+            command = re.sub(r"\A(\w+)", lambda match: match.group(1).lower(), command)
+        except (EOFError, KeyboardInterrupt):
+            print
+            break
+
+        if command in ("data", "log", "status", "stop", "kill"):
+            if not taskid:
+                logger.error("No task ID in use")
+                continue
+            raw = _client("%s/scan/%s/%s" % (addr, taskid, command))
+            res = dejsonize(raw)
+            if not res["success"]:
+                logger.error("Failed to execute command %s" % command)
+            dataToStdout("%s\n" % raw)
+
+        elif command.startswith("option"):
+            if not taskid:
+                logger.error("No task ID in use")
+                continue
+            try:
+                command, option = command.split(" ")
+            except ValueError:
+                raw = _client("%s/option/%s/list" % (addr, taskid))
+            else:
+                options = {"option": option}
+                raw = _client("%s/option/%s/get" % (addr, taskid), options)
+            res = dejsonize(raw)
+            if not res["success"]:
+                logger.error("Failed to execute command %s" % command)
+            dataToStdout("%s\n" % raw)
+
+        elif command.startswith("new"):
+            if ' ' not in command:
+                logger.error("Program arguments are missing")
+                continue
+
+            try:
+                argv = ["sqlmap.py"] + shlex.split(command)[1:]
+            except Exception, ex:
+                logger.error("Error occurred while parsing arguments ('%s')" % ex)
+                taskid = None
+                continue
+
+            try:
+                cmdLineOptions = cmdLineParser(argv).__dict__
+            except:
+                taskid = None
+                continue
+
+            for key in list(cmdLineOptions):
+                if cmdLineOptions[key] is None:
+                    del cmdLineOptions[key]
+
+            raw = _client("%s/task/new" % addr)
+            res = dejsonize(raw)
+            if not res["success"]:
+                logger.error("Failed to create new task")
+                continue
+            taskid = res["taskid"]
+            logger.info("New task ID is '%s'" % taskid)
+
+            raw = _client("%s/scan/%s/start" % (addr, taskid), cmdLineOptions)
+            res = dejsonize(raw)
+            if not res["success"]:
+                logger.error("Failed to start scan")
+                continue
+            logger.info("Scanning started")
+
+        elif command.startswith("use"):
+            taskid = (command.split()[1] if ' ' in command else "").strip("'\"")
+            if not taskid:
+                logger.error("Task ID is missing")
+                taskid = None
+                continue
+            elif not re.search(r"\A[0-9a-fA-F]{16}\Z", taskid):
+                logger.error("Invalid task ID '%s'" % taskid)
+                taskid = None
+                continue
+            logger.info("Switching to task ID '%s' " % taskid)
+
+        elif command in ("list", "flush"):
+            raw = _client("%s/admin/%s/%s" % (addr, taskid or 0, command))
+            res = dejsonize(raw)
+            if not res["success"]:
+                logger.error("Failed to execute command %s" % command)
+            elif command == "flush":
+                taskid = None
+            dataToStdout("%s\n" % raw)
+
+        elif command in ("exit", "bye", "quit", 'q'):
+            return
+
+        elif command in ("help", "?"):
+            msg = "help           Show this help message\n"
+            msg += "new ARGS       Start a new scan task with provided arguments (e.g. 'new -u \"http://testphp.vulnweb.com/artists.php?artist=1\"')\n"
+            msg += "use TASKID     Switch current context to different task (e.g. 'use c04d8c5c7582efb4')\n"
+            msg += "data           Retrieve and show data for current task\n"
+            msg += "log            Retrieve and show log for current task\n"
+            msg += "status         Retrieve and show status for current task\n"
+            msg += "option OPTION  Retrieve and show option for current task\n"
+            msg += "options        Retrieve and show all options for current task\n"
+            msg += "stop           Stop current task\n"
+            msg += "kill           Kill current task\n"
+            msg += "list           Display all tasks\n"
+            msg += "flush          Flush tasks (delete all tasks)\n"
+            msg += "exit           Exit this client\n"
+
+            dataToStdout(msg)
+
+        elif command:
+            logger.error("Unknown command '%s'" % command)

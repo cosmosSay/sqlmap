@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import random
@@ -15,8 +15,7 @@ __priority__ = PRIORITY.NORMAL
 
 def tamper(payload, **kwargs):
     """
-    Replaces predefined SQL keywords with representations
-    suitable for replacement (e.g. .replace("SELECT", "")) filters
+    Replaces predefined SQL keywords with representations suitable for replacement filters (e.g. SELECT -> SELSELECTECT)
 
     Notes:
         * Useful to bypass very weak custom filters

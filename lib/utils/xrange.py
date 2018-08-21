@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 class xrange(object):
@@ -28,7 +28,7 @@ class xrange(object):
             self._slice = slice(*args)
         if self._slice.stop is None:
             raise TypeError("xrange stop must not be None")
-        
+
     @property
     def start(self):
         if self._slice.start is not None:
@@ -49,12 +49,10 @@ class xrange(object):
         return hash(self._slice)
 
     def __cmp__(self, other):
-        return (cmp(type(self), type(other)) or
-                cmp(self._slice, other._slice))
+        return (cmp(type(self), type(other)) or cmp(self._slice, other._slice))
 
     def __repr__(self):
-        return '%s(%r, %r, %r)' % (type(self).__name__,
-                                   self.start, self.stop, self.step)
+        return '%s(%r, %r, %r)' % (type(self).__name__, self.start, self.stop, self.step)
 
     def __len__(self):
         return self._len()
@@ -69,19 +67,25 @@ class xrange(object):
         if isinstance(index, slice):
             start, stop, step = index.indices(self._len())
             return xrange(self._index(start),
-                          self._index(stop), step*self.step)
+                          self._index(stop), step * self.step)
         elif isinstance(index, (int, long)):
             if index < 0:
                 fixed_index = index + self._len()
             else:
                 fixed_index = index
-                
+
             if not 0 <= fixed_index < self._len():
                 raise IndexError("Index %d out of %r" % (index, self))
-            
+
             return self._index(fixed_index)
         else:
             raise TypeError("xrange indices must be slices or integers")
 
     def _index(self, i):
         return self.start + self.step * i
+
+    def index(self, i):
+        if self.start <= i < self.stop:
+            return i - self.start
+        else:
+            raise ValueError("%d is not in list" % i)

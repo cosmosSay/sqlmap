@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import re
@@ -10,15 +10,18 @@ import re
 from lib.core.common import Backend
 from lib.core.common import extractRegexResult
 from lib.core.common import getSQLSnippet
+from lib.core.common import getUnicode
 from lib.core.common import isDBMSVersionAtLeast
 from lib.core.common import isNumber
 from lib.core.common import isTechniqueAvailable
 from lib.core.common import randomInt
 from lib.core.common import randomStr
 from lib.core.common import safeSQLIdentificatorNaming
+from lib.core.common import safeStringFormat
 from lib.core.common import singleTimeWarnMessage
 from lib.core.common import splitFields
 from lib.core.common import unArrayizeValue
+from lib.core.common import urlencode
 from lib.core.common import zeroDepthSearch
 from lib.core.data import conf
 from lib.core.data import kb
@@ -26,14 +29,21 @@ from lib.core.data import queries
 from lib.core.dicts import DUMP_DATA_PREPROCESS
 from lib.core.dicts import FROM_DUMMY_TABLE
 from lib.core.enums import DBMS
+from lib.core.enums import HTTP_HEADER
 from lib.core.enums import PAYLOAD
 from lib.core.enums import PLACE
 from lib.core.enums import POST_HINT
 from lib.core.exception import SqlmapNoneDataException
-from lib.core.settings import CUSTOM_INJECTION_MARK_CHAR
+from lib.core.settings import BOUNDARY_BACKSLASH_MARKER
+from lib.core.settings import BOUNDED_INJECTION_MARKER
+from lib.core.settings import DEFAULT_COOKIE_DELIMITER
+from lib.core.settings import DEFAULT_GET_POST_DELIMITER
 from lib.core.settings import GENERIC_SQL_COMMENT
+from lib.core.settings import INFERENCE_MARKER
+from lib.core.settings import NULL
 from lib.core.settings import PAYLOAD_DELIMITER
 from lib.core.settings import REPLACEMENT_MARKER
+from lib.core.settings import SLEEP_TIME_MARKER
 from lib.core.unescaper import unescaper
 
 class Agent(object):
@@ -44,16 +54,16 @@ class Agent(object):
     def payloadDirect(self, query):
         query = self.cleanupPayload(query)
 
-        if query.startswith("AND "):
-            query = query.replace("AND ", "SELECT ", 1)
-        elif query.startswith(" UNION ALL "):
-            query = query.replace(" UNION ALL ", "", 1)
+        if query.upper().startswith("AND "):
+            query = re.sub(r"(?i)AND ", "SELECT ", query, 1)
+        elif query.upper().startswith(" UNION ALL "):
+            query = re.sub(r"(?i) UNION ALL ", "", query, 1)
         elif query.startswith("; "):
             query = query.replace("; ", "", 1)
 
         if Backend.getIdentifiedDbms() in (DBMS.ORACLE,):  # non-standard object(s) make problems to a database connector while returned (e.g. XMLTYPE)
             _, _, _, _, _, _, fieldsToCastStr, _ = self.getFields(query)
-            for field in fieldsToCastStr.split(","):
+            for field in fieldsToCastStr.split(','):
                 query = query.replace(field, self.nullAndCastField(field))
 
         if kb.tamperFunctions:
@@ -73,7 +83,9 @@ class Agent(object):
 
         retVal = ""
 
-        if where is None and isTechniqueAvailable(kb.technique):
+        if kb.forceWhere:
+            where = kb.forceWhere
+        elif where is None and isTechniqueAvailable(kb.technique):
             where = kb.injection.data[kb.technique].where
 
         if kb.injection.place is not None:
@@ -84,40 +96,57 @@ class Agent(object):
 
         paramString = conf.parameters[place]
         paramDict = conf.paramDict[place]
-        origValue = paramDict[parameter]
+        origValue = getUnicode(paramDict[parameter])
+        newValue = getUnicode(newValue) if newValue else newValue
 
-        if place == PLACE.URI:
+        if place == PLACE.URI or BOUNDED_INJECTION_MARKER in origValue:
             paramString = origValue
-            origValue = origValue.split(CUSTOM_INJECTION_MARK_CHAR)[0]
+            if place == PLACE.URI:
+                origValue = origValue.split(kb.customInjectionMark)[0]
+            else:
+                origValue = filter(None, (re.search(_, origValue.split(BOUNDED_INJECTION_MARKER)[0]) for _ in (r"\w+\Z", r"[^\"'><]+\Z", r"[^ ]+\Z")))[0].group(0)
             origValue = origValue[origValue.rfind('/') + 1:]
-            for char in ('?', '=', ':'):
+            for char in ('?', '=', ':', ','):
                 if char in origValue:
                     origValue = origValue[origValue.rfind(char) + 1:]
         elif place == PLACE.CUSTOM_POST:
             paramString = origValue
-            origValue = origValue.split(CUSTOM_INJECTION_MARK_CHAR)[0]
+            origValue = origValue.split(kb.customInjectionMark)[0]
             if kb.postHint in (POST_HINT.SOAP, POST_HINT.XML):
                 origValue = origValue.split('>')[-1]
-            elif kb.postHint == POST_HINT.JSON:
-                origValue = extractRegexResult(r"(?s)\"\s*:\s*(?P<result>\d+\Z)", origValue) or extractRegexResult(r'(?s)(?P<result>[^"]+\Z)', origValue)
+            elif kb.postHint in (POST_HINT.JSON, POST_HINT.JSON_LIKE):
+                origValue = extractRegexResult(r"(?s)\"\s*:\s*(?P<result>\d+\Z)", origValue) or extractRegexResult(r'(?s)[\s:]*(?P<result>[^"\[,]+\Z)', origValue)
             else:
-                origValue = extractRegexResult(r"(?s)(?P<result>[^\s<>{}();'\"]+\Z)", origValue)
+                _ = extractRegexResult(r"(?s)(?P<result>[^\s<>{}();'\"&]+\Z)", origValue) or ""
+                origValue = _.split('=', 1)[1] if '=' in _ else ""
         elif place == PLACE.CUSTOM_HEADER:
             paramString = origValue
-            origValue = origValue.split(CUSTOM_INJECTION_MARK_CHAR)[0]
-            origValue = origValue[origValue.index(',') + 1:]
+            origValue = origValue[origValue.find(',') + 1:]
+            origValue = origValue.split(kb.customInjectionMark)[0]
+            match = re.search(r"([^;]+)=(?P<value>[^;]*);?\Z", origValue)
+            if match:
+                origValue = match.group("value")
+            elif ',' in paramString:
+                header = paramString.split(',')[0]
+
+                if header.upper() == HTTP_HEADER.AUTHORIZATION.upper():
+                    origValue = origValue.split(' ')[-1].split(':')[-1]
+
+        origValue = origValue or ""
 
         if value is None:
             if where == PAYLOAD.WHERE.ORIGINAL:
                 value = origValue
             elif where == PAYLOAD.WHERE.NEGATIVE:
                 if conf.invalidLogical:
-                    match = re.search(r'\A[^ ]+', newValue)
+                    match = re.search(r"\A[^ ]+", newValue)
                     newValue = newValue[len(match.group() if match else ""):]
                     _ = randomInt(2)
-                    value = "%s%s AND %s=%s" % (origValue, match.group() if match else "", _, _ + 1)
+                    value = "%s%s AND %s LIKE %s" % (origValue, match.group() if match else "", _, _ + 1)
                 elif conf.invalidBignum:
-                    value = "%d.%d" % (randomInt(6), randomInt(1))
+                    value = randomInt(6)
+                elif conf.invalidString:
+                    value = randomStr(6)
                 else:
                     if newValue.startswith("-"):
                         value = ""
@@ -133,28 +162,51 @@ class Agent(object):
         newValue = self.cleanupPayload(newValue, origValue)
 
         if place in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER):
-            _ = "%s%s" % (origValue, CUSTOM_INJECTION_MARK_CHAR)
+            _ = "%s%s" % (origValue, kb.customInjectionMark)
             if kb.postHint == POST_HINT.JSON and not isNumber(newValue) and not '"%s"' % _ in paramString:
                 newValue = '"%s"' % newValue
-            newValue = newValue.replace(CUSTOM_INJECTION_MARK_CHAR, REPLACEMENT_MARKER)
+            elif kb.postHint == POST_HINT.JSON_LIKE and not isNumber(newValue) and not "'%s'" % _ in paramString:
+                newValue = "'%s'" % newValue
+            newValue = newValue.replace(kb.customInjectionMark, REPLACEMENT_MARKER)
             retVal = paramString.replace(_, self.addPayloadDelimiters(newValue))
-            retVal = retVal.replace(CUSTOM_INJECTION_MARK_CHAR, "").replace(REPLACEMENT_MARKER, CUSTOM_INJECTION_MARK_CHAR)
+            retVal = retVal.replace(kb.customInjectionMark, "").replace(REPLACEMENT_MARKER, kb.customInjectionMark)
+        elif BOUNDED_INJECTION_MARKER in paramDict[parameter]:
+            retVal = paramString.replace("%s%s" % (origValue, BOUNDED_INJECTION_MARKER), self.addPayloadDelimiters(newValue))
         elif place in (PLACE.USER_AGENT, PLACE.REFERER, PLACE.HOST):
             retVal = paramString.replace(origValue, self.addPayloadDelimiters(newValue))
         else:
-            retVal = re.sub(r"(\A|\b)%s=%s" % (re.escape(parameter), re.escape(origValue)), "%s=%s" % (parameter, self.addPayloadDelimiters(newValue)), paramString)
+            def _(pattern, repl, string):
+                retVal = string
+                match = None
+                for match in re.finditer(pattern, string):
+                    pass
+
+                if match:
+                    while True:
+                        _ = re.search(r"\\g<([^>]+)>", repl)
+                        if _:
+                            try:
+                                repl = repl.replace(_.group(0), match.group(int(_.group(1)) if _.group(1).isdigit() else _.group(1)))
+                            except IndexError:
+                                break
+                        else:
+                            break
+                    retVal = string[:match.start()] + repl + string[match.end():]
+                return retVal
+
+            if origValue:
+                regex = r"(\A|\b)%s=%s%s" % (re.escape(parameter), re.escape(origValue), r"(\Z|\b)" if origValue[-1].isalnum() else "")
+                retVal = _(regex, "%s=%s" % (parameter, self.addPayloadDelimiters(newValue)), paramString)
+            else:
+                retVal = _(r"(\A|\b)%s=%s(\Z|%s|%s|\s)" % (re.escape(parameter), re.escape(origValue), DEFAULT_GET_POST_DELIMITER, DEFAULT_COOKIE_DELIMITER), r"%s=%s\g<2>" % (parameter, self.addPayloadDelimiters(newValue)), paramString)
+
+            if retVal == paramString and urlencode(parameter) != parameter:
+                retVal = _(r"(\A|\b)%s=%s" % (re.escape(urlencode(parameter)), re.escape(origValue)), "%s=%s" % (urlencode(parameter), self.addPayloadDelimiters(newValue)), paramString)
+
+        if retVal:
+            retVal = retVal.replace(BOUNDARY_BACKSLASH_MARKER, '\\')
 
         return retVal
-
-    def fullPayload(self, query):
-        if conf.direct:
-            return self.payloadDirect(query)
-
-        query = self.prefixQuery(query)
-        query = self.suffixQuery(query)
-        payload = self.payload(newValue=query)
-
-        return payload
 
     def prefixQuery(self, expression, prefix=None, where=None, clause=None):
         """
@@ -165,6 +217,9 @@ class Agent(object):
 
         if conf.direct:
             return self.payloadDirect(expression)
+
+        if expression is None:
+            return None
 
         expression = self.cleanupPayload(expression)
         expression = unescaper.escape(expression)
@@ -191,10 +246,10 @@ class Agent(object):
         else:
             query = kb.injection.prefix or prefix or ""
 
-            if not (expression and expression[0] == ";"):
+            if not (expression and expression[0] == ';') and not (query and query[-1] in ('(', ')') and expression and expression[0] in ('(', ')')) and not (query and query[-1] == '('):
                 query += " "
 
-        query = "%s%s" % (query, expression)
+        query = "%s%s" % ((query or "").replace('\\', BOUNDARY_BACKSLASH_MARKER), expression)
 
         return query
 
@@ -207,6 +262,9 @@ class Agent(object):
         if conf.direct:
             return self.payloadDirect(expression)
 
+        if expression is None:
+            return None
+
         expression = self.cleanupPayload(expression)
 
         # Take default values if None
@@ -216,7 +274,7 @@ class Agent(object):
             where = kb.injection.data[kb.technique].where if where is None else where
             comment = kb.injection.data[kb.technique].comment if comment is None else comment
 
-        if Backend.getIdentifiedDbms() == DBMS.ACCESS and comment == GENERIC_SQL_COMMENT:
+        if Backend.getIdentifiedDbms() == DBMS.ACCESS and any((comment or "").startswith(_) for _ in ("--", "[GENERIC_SQL_COMMENT]")):
             comment = queries[DBMS.ACCESS].comment.query
 
         if comment is not None:
@@ -224,35 +282,40 @@ class Agent(object):
 
         # If we are replacing (<where>) the parameter original value with
         # our payload do not append the suffix
-        if where == PAYLOAD.WHERE.REPLACE:
+        if where == PAYLOAD.WHERE.REPLACE and not conf.suffix:
             pass
 
         elif suffix and not comment:
-            expression += " %s" % suffix
+            expression += suffix.replace('\\', BOUNDARY_BACKSLASH_MARKER)
 
-        return re.sub(r"(?s);\W*;", ";", expression)
+        return re.sub(r";\W*;", ";", expression)
 
     def cleanupPayload(self, payload, origValue=None):
         if payload is None:
             return
 
-        _ = (
-                ("[DELIMITER_START]", kb.chars.start), ("[DELIMITER_STOP]", kb.chars.stop),\
-                ("[AT_REPLACE]", kb.chars.at), ("[SPACE_REPLACE]", kb.chars.space), ("[DOLLAR_REPLACE]", kb.chars.dollar),\
-                ("[HASH_REPLACE]", kb.chars.hash_),
-            )
-        payload = reduce(lambda x, y: x.replace(y[0], y[1]), _, payload)
+        replacements = (
+            ("[DELIMITER_START]", kb.chars.start),
+            ("[DELIMITER_STOP]", kb.chars.stop),
+            ("[AT_REPLACE]", kb.chars.at),
+            ("[SPACE_REPLACE]", kb.chars.space),
+            ("[DOLLAR_REPLACE]", kb.chars.dollar),
+            ("[HASH_REPLACE]", kb.chars.hash_),
+            ("[GENERIC_SQL_COMMENT]", GENERIC_SQL_COMMENT)
+        )
+        payload = reduce(lambda x, y: x.replace(y[0], y[1]), replacements, payload)
 
-        for _ in set(re.findall(r"\[RANDNUM(?:\d+)?\]", payload, re.I)):
+        for _ in set(re.findall(r"(?i)\[RANDNUM(?:\d+)?\]", payload)):
             payload = payload.replace(_, str(randomInt()))
 
-        for _ in set(re.findall(r"\[RANDSTR(?:\d+)?\]", payload, re.I)):
+        for _ in set(re.findall(r"(?i)\[RANDSTR(?:\d+)?\]", payload)):
             payload = payload.replace(_, randomStr())
 
-        if origValue is not None:
-            payload = payload.replace("[ORIGVALUE]", origValue if origValue.isdigit() else unescaper.escape("'%s'" % origValue))
+        if origValue is not None and "[ORIGVALUE]" in payload:
+            origValue = getUnicode(origValue)
+            payload = getUnicode(payload).replace("[ORIGVALUE]", origValue if origValue.isdigit() else unescaper.escape("'%s'" % origValue))
 
-        if "[INFERENCE]" in payload:
+        if INFERENCE_MARKER in payload:
             if Backend.getIdentifiedDbms() is not None:
                 inference = queries[Backend.getIdentifiedDbms()].inference
 
@@ -264,8 +327,8 @@ class Agent(object):
                 else:
                     inferenceQuery = inference.query
 
-                payload = payload.replace("[INFERENCE]", inferenceQuery)
-            else:
+                payload = payload.replace(INFERENCE_MARKER, inferenceQuery)
+            elif not kb.testMode:
                 errMsg = "invalid usage of inference payload without "
                 errMsg += "knowledge of underlying DBMS"
                 raise SqlmapNoneDataException(errMsg)
@@ -278,7 +341,13 @@ class Agent(object):
         """
 
         if payload:
-            payload = payload.replace("[SLEEPTIME]", str(conf.timeSec))
+            payload = payload.replace(SLEEP_TIME_MARKER, str(conf.timeSec))
+
+            for _ in set(re.findall(r"\[RANDNUM(?:\d+)?\]", payload, re.I)):
+                payload = payload.replace(_, str(randomInt()))
+
+            for _ in set(re.findall(r"\[RANDSTR(?:\d+)?\]", payload, re.I)):
+                payload = payload.replace(_, randomStr())
 
         return payload
 
@@ -297,7 +366,7 @@ class Agent(object):
         rootQuery = queries[Backend.getIdentifiedDbms()]
         hexField = field
 
-        if 'hex' in rootQuery:
+        if "hex" in rootQuery:
             hexField = rootQuery.hex.query % field
         else:
             warnMsg = "switch '--hex' is currently not supported on DBMS %s" % Backend.getIdentifiedDbms()
@@ -350,7 +419,8 @@ class Agent(object):
                 else:
                     nulledCastedField = rootQuery.isnull.query % nulledCastedField
 
-            if conf.hexConvert or conf.binaryFields and field in conf.binaryFields.split(','):
+            kb.binaryField = conf.binaryFields and field in conf.binaryFields.split(',')
+            if conf.hexConvert or kb.binaryField:
                 nulledCastedField = self.hexConvertField(nulledCastedField)
 
         return nulledCastedField
@@ -385,7 +455,7 @@ class Agent(object):
         @rtype: C{str}
         """
 
-        if not Backend.getDbms():
+        if not Backend.getIdentifiedDbms():
             return fields
 
         if fields.startswith("(CASE") or fields.startswith("(IIF") or fields.startswith("SUBSTR") or fields.startswith("MID(") or re.search(r"\A'[^']+'\Z", fields):
@@ -420,7 +490,7 @@ class Agent(object):
         @rtype: C{str}
         """
 
-        prefixRegex = r"(?:\s+(?:FIRST|SKIP)\s+\d+)*"
+        prefixRegex = r"(?:\s+(?:FIRST|SKIP|LIMIT(?: \d+)?)\s+\d+)*"
         fieldsSelectTop = re.search(r"\ASELECT\s+TOP\s+[\d]+\s+(.+?)\s+FROM", query, re.I)
         fieldsSelectRownum = re.search(r"\ASELECT\s+([^()]+?),\s*ROWNUM AS LIMIT FROM", query, re.I)
         fieldsSelectDistinct = re.search(r"\ASELECT%s\s+DISTINCT\((.+?)\)\s+FROM" % prefixRegex, query, re.I)
@@ -436,30 +506,36 @@ class Agent(object):
         if not _:
             fieldsSelectFrom = None
 
+        fieldsToCastStr = fieldsNoSelect
+
         if fieldsSubstr:
             fieldsToCastStr = query
         elif fieldsMinMaxstr:
-            fieldsToCastStr = fieldsMinMaxstr.groups()[0]
+            fieldsToCastStr = fieldsMinMaxstr.group(1)
         elif fieldsExists:
-            fieldsToCastStr = fieldsSelect.groups()[0]
+            if fieldsSelect:
+                fieldsToCastStr = fieldsSelect.group(1)
         elif fieldsSelectTop:
-            fieldsToCastStr = fieldsSelectTop.groups()[0]
+            fieldsToCastStr = fieldsSelectTop.group(1)
         elif fieldsSelectRownum:
-            fieldsToCastStr = fieldsSelectRownum.groups()[0]
+            fieldsToCastStr = fieldsSelectRownum.group(1)
         elif fieldsSelectDistinct:
-            fieldsToCastStr = fieldsSelectDistinct.groups()[0]
+            if Backend.getDbms() in (DBMS.HSQLDB,):
+                fieldsToCastStr = fieldsNoSelect
+            else:
+                fieldsToCastStr = fieldsSelectDistinct.group(1)
         elif fieldsSelectCase:
-            fieldsToCastStr = fieldsSelectCase.groups()[0]
+            fieldsToCastStr = fieldsSelectCase.group(1)
         elif fieldsSelectFrom:
             fieldsToCastStr = query[:unArrayizeValue(_)] if _ else query
             fieldsToCastStr = re.sub(r"\ASELECT%s\s+" % prefixRegex, "", fieldsToCastStr)
         elif fieldsSelect:
-            fieldsToCastStr = fieldsSelect.groups()[0]
-        else:
-            fieldsToCastStr = fieldsNoSelect
+            fieldsToCastStr = fieldsSelect.group(1)
+
+        fieldsToCastStr = fieldsToCastStr or ""
 
         # Function
-        if re.search("\A\w+\(.*\)", fieldsToCastStr, re.I) or (fieldsSelectCase and "WHEN use" not in query) or fieldsSubstr:
+        if re.search(r"\A\w+\(.*\)", fieldsToCastStr, re.I) or (fieldsSelectCase and "WHEN use" not in query) or fieldsSubstr:
             fieldsToCastList = [fieldsToCastStr]
         else:
             fieldsToCastList = splitFields(fieldsToCastStr)
@@ -524,7 +600,7 @@ class Agent(object):
         else:
             return query
 
-        if Backend.getIdentifiedDbms() in (DBMS.MYSQL,):
+        if Backend.isDbms(DBMS.MYSQL):
             if fieldsExists:
                 concatenatedQuery = concatenatedQuery.replace("SELECT ", "CONCAT('%s'," % kb.chars.start, 1)
                 concatenatedQuery += ",'%s')" % kb.chars.stop
@@ -551,6 +627,7 @@ class Agent(object):
                 concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||" % kb.chars.start, 1)
                 _ = unArrayizeValue(zeroDepthSearch(concatenatedQuery, " FROM "))
                 concatenatedQuery = "%s||'%s'%s" % (concatenatedQuery[:_], kb.chars.stop, concatenatedQuery[_:])
+                concatenatedQuery = re.sub(r"('%s'\|\|)(.+)(%s)" % (kb.chars.start, re.escape(castedFields)), r"\g<2>\g<1>\g<3>", concatenatedQuery)
             elif fieldsSelect:
                 concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||" % kb.chars.start, 1)
                 concatenatedQuery += "||'%s'" % kb.chars.stop
@@ -562,7 +639,7 @@ class Agent(object):
                 concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'+" % kb.chars.start, 1)
                 concatenatedQuery += "+'%s'" % kb.chars.stop
             elif fieldsSelectTop:
-                topNum = re.search("\ASELECT\s+TOP\s+([\d]+)\s+", concatenatedQuery, re.I).group(1)
+                topNum = re.search(r"\ASELECT\s+TOP\s+([\d]+)\s+", concatenatedQuery, re.I).group(1)
                 concatenatedQuery = concatenatedQuery.replace("SELECT TOP %s " % topNum, "TOP %s '%s'+" % (topNum, kb.chars.start), 1)
                 concatenatedQuery = concatenatedQuery.replace(" FROM ", "+'%s' FROM " % kb.chars.stop, 1)
             elif fieldsSelectCase:
@@ -596,24 +673,23 @@ class Agent(object):
                 concatenatedQuery = "'%s'&%s&'%s'" % (kb.chars.start, concatenatedQuery, kb.chars.stop)
 
         else:
-            warnMsg = "applying generic concatenation with double pipes ('||')"
+            warnMsg = "applying generic concatenation (CONCAT)"
             singleTimeWarnMessage(warnMsg)
 
             if fieldsExists:
-                concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||" % kb.chars.start, 1)
-                concatenatedQuery += "||'%s'" % kb.chars.stop
+                concatenatedQuery = concatenatedQuery.replace("SELECT ", "CONCAT(CONCAT('%s'," % kb.chars.start, 1)
+                concatenatedQuery += "),'%s')" % kb.chars.stop
             elif fieldsSelectCase:
-                concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||(SELECT " % kb.chars.start, 1)
-                concatenatedQuery += ")||'%s'" % kb.chars.stop
+                concatenatedQuery = concatenatedQuery.replace("SELECT ", "CONCAT(CONCAT('%s'," % kb.chars.start, 1)
+                concatenatedQuery += "),'%s')" % kb.chars.stop
             elif fieldsSelectFrom:
-                concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||" % kb.chars.start, 1)
                 _ = unArrayizeValue(zeroDepthSearch(concatenatedQuery, " FROM "))
-                concatenatedQuery = "%s||'%s'%s" % (concatenatedQuery[:_], kb.chars.stop, concatenatedQuery[_:])
+                concatenatedQuery = "%s),'%s')%s" % (concatenatedQuery[:_].replace("SELECT ", "CONCAT(CONCAT('%s'," % kb.chars.start, 1), kb.chars.stop, concatenatedQuery[_:])
             elif fieldsSelect:
-                concatenatedQuery = concatenatedQuery.replace("SELECT ", "'%s'||" % kb.chars.start, 1)
-                concatenatedQuery += "||'%s'" % kb.chars.stop
+                concatenatedQuery = concatenatedQuery.replace("SELECT ", "CONCAT(CONCAT('%s'," % kb.chars.start, 1)
+                concatenatedQuery += "),'%s')" % kb.chars.stop
             elif fieldsNoSelect:
-                concatenatedQuery = "'%s'||%s||'%s'" % (kb.chars.start, concatenatedQuery, kb.chars.stop)
+                concatenatedQuery = "CONCAT(CONCAT('%s',%s),'%s')" % (kb.chars.start, concatenatedQuery, kb.chars.stop)
 
         return concatenatedQuery
 
@@ -650,8 +726,11 @@ class Agent(object):
 
         if conf.uFrom:
             fromTable = " FROM %s" % conf.uFrom
-        else:
-            fromTable = fromTable or FROM_DUMMY_TABLE.get(Backend.getIdentifiedDbms(), "")
+        elif not fromTable:
+            if kb.tableFrom:
+                fromTable = " FROM %s" % kb.tableFrom
+            else:
+                fromTable = FROM_DUMMY_TABLE.get(Backend.getIdentifiedDbms(), "")
 
         if query.startswith("SELECT "):
             query = query[len("SELECT "):]
@@ -672,17 +751,20 @@ class Agent(object):
             if fromTable and query.endswith(fromTable):
                 query = query[:-len(fromTable)]
 
-        topNumRegex = re.search("\ATOP\s+([\d]+)\s+", query, re.I)
+        topNumRegex = re.search(r"\ATOP\s+([\d]+)\s+", query, re.I)
         if topNumRegex:
             topNum = topNumRegex.group(1)
             query = query[len("TOP %s " % topNum):]
             unionQuery += "TOP %s " % topNum
 
-        intoRegExp = re.search("(\s+INTO (DUMP|OUT)FILE\s+\'(.+?)\')", query, re.I)
+        intoRegExp = re.search(r"(\s+INTO (DUMP|OUT)FILE\s+'(.+?)')", query, re.I)
 
         if intoRegExp:
             intoRegExp = intoRegExp.group(1)
             query = query[:query.index(intoRegExp)]
+
+            position = 0
+            char = NULL
 
         for element in xrange(0, count):
             if element > 0:
@@ -723,7 +805,7 @@ class Agent(object):
         stopLimit = None
         limitCond = True
 
-        topLimit = re.search("TOP\s+([\d]+)\s+", expression, re.I)
+        topLimit = re.search(r"TOP\s+([\d]+)\s+", expression, re.I)
 
         limitRegExp = re.search(queries[Backend.getIdentifiedDbms()].limitregexp.query, expression, re.I)
 
@@ -778,7 +860,7 @@ class Agent(object):
                     if expression.find(queries[Backend.getIdentifiedDbms()].limitstring.query) > 0:
                         _ = expression.index(queries[Backend.getIdentifiedDbms()].limitstring.query)
                     else:
-                        _ = expression.index("LIMIT ")
+                        _ = re.search(r"\bLIMIT\b", expression, re.I).start()
                     expression = expression[:_]
 
                 elif Backend.getIdentifiedDbms() in (DBMS.MSSQL, DBMS.SYBASE):
@@ -813,23 +895,44 @@ class Agent(object):
         @rtype: C{str}
         """
 
+        if " FROM " not in query:
+            return query
+
         limitedQuery = query
         limitStr = queries[Backend.getIdentifiedDbms()].limit.query
         fromIndex = limitedQuery.index(" FROM ")
         untilFrom = limitedQuery[:fromIndex]
         fromFrom = limitedQuery[fromIndex + 1:]
-        orderBy = False
+        orderBy = None
 
         if Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL, DBMS.SQLITE):
             limitStr = queries[Backend.getIdentifiedDbms()].limit.query % (num, 1)
             limitedQuery += " %s" % limitStr
+
+        elif Backend.isDbms(DBMS.HSQLDB):
+            match = re.search(r"ORDER BY [^ ]+", limitedQuery)
+            if match:
+                limitedQuery = re.sub(r"\s*%s\s*" % match.group(0), " ", limitedQuery).strip()
+                limitedQuery += " %s" % match.group(0)
+
+            if query.startswith("SELECT "):
+                limitStr = queries[Backend.getIdentifiedDbms()].limit.query % (num, 1)
+                limitedQuery = limitedQuery.replace("SELECT ", "SELECT %s " % limitStr, 1)
+            else:
+                limitStr = queries[Backend.getIdentifiedDbms()].limit.query2 % (1, num)
+                limitedQuery += " %s" % limitStr
+
+            if not match:
+                match = re.search(r"%s\s+(\w+)" % re.escape(limitStr), limitedQuery)
+                if match:
+                    orderBy = " ORDER BY %s" % match.group(1)
 
         elif Backend.isDbms(DBMS.FIREBIRD):
             limitStr = queries[Backend.getIdentifiedDbms()].limit.query % (num + 1, num + 1)
             limitedQuery += " %s" % limitStr
 
         elif Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2):
-            if not " ORDER BY " in limitedQuery:
+            if " ORDER BY " not in limitedQuery:
                 limitStr = limitStr.replace(") WHERE LIMIT", " ORDER BY 1 ASC) WHERE LIMIT")
             elif " ORDER BY " in limitedQuery and "SELECT " in limitedQuery:
                 limitedQuery = limitedQuery[:limitedQuery.index(" ORDER BY ")]
@@ -840,7 +943,7 @@ class Agent(object):
             else:
                 limitedQuery = "%s FROM (SELECT %s,%s" % (untilFrom, ','.join(f for f in field), limitStr)
 
-            limitedQuery = limitedQuery % fromFrom
+            limitedQuery = safeStringFormat(limitedQuery, (fromFrom,))
             limitedQuery += "=%d" % (num + 1)
 
         elif Backend.isDbms(DBMS.MSSQL):
@@ -850,7 +953,7 @@ class Agent(object):
                 orderBy = limitedQuery[limitedQuery.index(" ORDER BY "):]
                 limitedQuery = limitedQuery[:limitedQuery.index(" ORDER BY ")]
 
-            notDistincts = re.findall("DISTINCT[\(\s+](.+?)\)*\s+", limitedQuery, re.I)
+            notDistincts = re.findall(r"DISTINCT[\(\s+](.+?)\)*\s+", limitedQuery, re.I)
 
             for notDistinct in notDistincts:
                 limitedQuery = limitedQuery.replace("DISTINCT(%s)" % notDistinct, notDistinct)
@@ -867,7 +970,7 @@ class Agent(object):
                     limitedQuery = limitedQuery.replace(" (SELECT TOP %s" % startTopNums, " (SELECT TOP %d" % num)
                     forgeNotIn = False
                 else:
-                    topNum = re.search("TOP\s+([\d]+)\s+", limitedQuery, re.I).group(1)
+                    topNum = re.search(r"TOP\s+([\d]+)\s+", limitedQuery, re.I).group(1)
                     limitedQuery = limitedQuery.replace("TOP %s " % topNum, "")
 
             if forgeNotIn:
@@ -883,7 +986,7 @@ class Agent(object):
                     limitedQuery += "NOT IN (%s" % (limitStr % num)
                     limitedQuery += "%s %s ORDER BY %s) ORDER BY %s" % (self.nullAndCastField(uniqueField or field), fromFrom, uniqueField or "1", uniqueField or "1")
                 else:
-                    match = re.search(" ORDER BY (\w+)\Z", query)
+                    match = re.search(r" ORDER BY (\w+)\Z", query)
                     field = match.group(1) if match else field
 
                     if " WHERE " in limitedQuery:
@@ -901,12 +1004,13 @@ class Agent(object):
 
     def forgeQueryOutputLength(self, expression):
         lengthQuery = queries[Backend.getIdentifiedDbms()].length.query
-        select = re.search("\ASELECT\s+", expression, re.I)
-        selectTopExpr = re.search("\ASELECT\s+TOP\s+[\d]+\s+(.+?)\s+FROM", expression, re.I)
+        select = re.search(r"\ASELECT\s+", expression, re.I)
+        selectTopExpr = re.search(r"\ASELECT\s+TOP\s+[\d]+\s+(.+?)\s+FROM", expression, re.I)
+        selectMinMaxExpr = re.search(r"\ASELECT\s+(MIN|MAX)\(.+?\)\s+FROM", expression, re.I)
 
         _, _, _, _, _, _, fieldsStr, _ = self.getFields(expression)
 
-        if selectTopExpr:
+        if selectTopExpr or selectMinMaxExpr:
             lengthExpr = lengthQuery % ("(%s)" % expression)
         elif select:
             lengthExpr = expression.replace(fieldsStr, lengthQuery % fieldsStr, 1)
@@ -942,37 +1046,54 @@ class Agent(object):
 
         return caseExpression
 
-    def addPayloadDelimiters(self, inpStr):
+    def addPayloadDelimiters(self, value):
         """
         Adds payload delimiters around the input string
         """
 
-        return "%s%s%s" % (PAYLOAD_DELIMITER, inpStr, PAYLOAD_DELIMITER) if inpStr else inpStr
+        return "%s%s%s" % (PAYLOAD_DELIMITER, value, PAYLOAD_DELIMITER) if value else value
 
-    def removePayloadDelimiters(self, inpStr):
+    def removePayloadDelimiters(self, value):
         """
         Removes payload delimiters from inside the input string
         """
 
-        return inpStr.replace(PAYLOAD_DELIMITER, '') if inpStr else inpStr
+        return value.replace(PAYLOAD_DELIMITER, '') if value else value
 
-    def extractPayload(self, inpStr):
+    def extractPayload(self, value):
         """
         Extracts payload from inside of the input string
         """
 
-        return extractRegexResult("(?s)%s(?P<result>.*?)%s" % (PAYLOAD_DELIMITER, PAYLOAD_DELIMITER), inpStr)
+        _ = re.escape(PAYLOAD_DELIMITER)
+        return extractRegexResult(r"(?s)%s(?P<result>.*?)%s" % (_, _), value)
 
-    def replacePayload(self, inpStr, payload):
+    def replacePayload(self, value, payload):
         """
         Replaces payload inside the input string with a given payload
         """
 
-        return re.sub("(%s.*?%s)" % (PAYLOAD_DELIMITER, PAYLOAD_DELIMITER), ("%s%s%s" % (PAYLOAD_DELIMITER, payload, PAYLOAD_DELIMITER)).replace("\\", r"\\"), inpStr) if inpStr else inpStr
+        _ = re.escape(PAYLOAD_DELIMITER)
+        return re.sub(r"(?s)(%s.*?%s)" % (_, _), ("%s%s%s" % (PAYLOAD_DELIMITER, getUnicode(payload), PAYLOAD_DELIMITER)).replace("\\", r"\\"), value) if value else value
 
     def runAsDBMSUser(self, query):
         if conf.dbmsCred and "Ad Hoc Distributed Queries" not in query:
             query = getSQLSnippet(DBMS.MSSQL, "run_statement_as_user", USER=conf.dbmsUsername, PASSWORD=conf.dbmsPassword, STATEMENT=query.replace("'", "''"))
+
+        return query
+
+    def whereQuery(self, query):
+        if conf.dumpWhere and query:
+            prefix, suffix = query.split(" ORDER BY ") if " ORDER BY " in query else (query, "")
+
+            if "%s)" % conf.tbl.upper() in prefix.upper():
+                prefix = re.sub(r"(?i)%s\)" % re.escape(conf.tbl), "%s WHERE %s)" % (conf.tbl, conf.dumpWhere), prefix)
+            elif re.search(r"(?i)\bWHERE\b", prefix):
+                prefix += " AND %s" % conf.dumpWhere
+            else:
+                prefix += " WHERE %s" % conf.dumpWhere
+
+            query = "%s ORDER BY %s" % (prefix, suffix) if suffix else prefix
 
         return query
 

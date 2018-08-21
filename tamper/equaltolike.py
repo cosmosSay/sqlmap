@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2013 sqlmap developers (http://sqlmap.org/)
-See the file 'doc/COPYING' for copying permission
+Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+See the file 'LICENSE' for copying permission
 """
 
 import os
@@ -19,7 +19,7 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces all occurances of operator equal ('=') with operator 'LIKE'
+    Replaces all occurrences of operator equal ('=') with 'LIKE' counterpart
 
     Tested against:
         * Microsoft SQL Server 2005
@@ -35,15 +35,9 @@ def tamper(payload, **kwargs):
     'SELECT * FROM users WHERE id LIKE 1'
     """
 
-    def process(match):
-        word = match.group()
-        word = "%sLIKE%s" % (" " if word[0] != " " else "", " " if word[-1] != " " else "")
-
-        return word
-
     retVal = payload
 
     if payload:
-        retVal = re.sub(r"\s*=\s*", lambda match: process(match), retVal)
+        retVal = re.sub(r"\s*=\s*", " LIKE ", retVal)
 
     return retVal
