@@ -74,6 +74,7 @@ from lib.core.exception import SqlmapNoneDataException
 from lib.core.exception import SqlmapSilentQuitException
 from lib.core.exception import SqlmapSkipTargetException
 from lib.core.exception import SqlmapUserQuitException
+from lib.core.settings import BOUNDED_INJECTION_MARKER
 from lib.core.settings import CANDIDATE_SENTENCE_MIN_LENGTH
 from lib.core.settings import CHECK_INTERNET_ADDRESS
 from lib.core.settings import CHECK_INTERNET_VALUE
@@ -88,6 +89,8 @@ from lib.core.settings import IDS_WAF_CHECK_RATIO
 from lib.core.settings import IDS_WAF_CHECK_TIMEOUT
 from lib.core.settings import MAX_DIFFLIB_SEQUENCE_LENGTH
 from lib.core.settings import NON_SQLI_CHECK_PREFIX_SUFFIX_LENGTH
+from lib.core.settings import PRECONNECT_INCOMPATIBLE_SERVERS
+from lib.core.settings import SINGLE_QUOTE_MARKER
 from lib.core.settings import SLEEP_TIME_MARKER
 from lib.core.settings import SUHOSIN_MAX_VALUE_LENGTH
 from lib.core.settings import SUPPORTED_DBMS
@@ -359,7 +362,7 @@ def checkSqlInjection(place, parameter, value):
 
             # Parse test's <request>
             comment = agent.getComment(test.request) if len(conf.boundaries) > 1 else None
-            fstPayload = agent.cleanupPayload(test.request.payload, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) else None)
+            fstPayload = agent.cleanupPayload(test.request.payload, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) and BOUNDED_INJECTION_MARKER not in (value or "") else None)
 
             for boundary in boundaries:
                 injectable = False
@@ -470,13 +473,13 @@ def checkSqlInjection(place, parameter, value):
                     # payload was successful
                     # Parse test's <response>
                     for method, check in test.response.items():
-                        check = agent.cleanupPayload(check, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) else None)
+                        check = agent.cleanupPayload(check, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) and BOUNDED_INJECTION_MARKER not in (value or "") else None)
 
                         # In case of boolean-based blind SQL injection
                         if method == PAYLOAD.METHOD.COMPARISON:
                             # Generate payload used for comparison
                             def genCmpPayload():
-                                sndPayload = agent.cleanupPayload(test.response.comparison, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) else None)
+                                sndPayload = agent.cleanupPayload(test.response.comparison, origValue=value if place not in (PLACE.URI, PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER) and BOUNDED_INJECTION_MARKER not in (value or "") else None)
 
                                 # Forge response payload by prepending with
                                 # boundary's prefix and appending the boundary's
@@ -858,8 +861,8 @@ def heuristicCheckDbms(injection):
         if conf.noEscape and dbms not in FROM_DUMMY_TABLE:
             continue
 
-        if checkBooleanExpression("(SELECT '%s'%s)='%s'" % (randStr1, FROM_DUMMY_TABLE.get(dbms, ""), randStr1)):
-            if not checkBooleanExpression("(SELECT '%s'%s)='%s'" % (randStr1, FROM_DUMMY_TABLE.get(dbms, ""), randStr2)):
+        if checkBooleanExpression("(SELECT '%s'%s)=%s%s%s" % (randStr1, FROM_DUMMY_TABLE.get(dbms, ""), SINGLE_QUOTE_MARKER, randStr1, SINGLE_QUOTE_MARKER)):
+            if not checkBooleanExpression("(SELECT '%s'%s)=%s%s%s" % (randStr1, FROM_DUMMY_TABLE.get(dbms, ""), SINGLE_QUOTE_MARKER, randStr2, SINGLE_QUOTE_MARKER)):
                 retVal = dbms
                 break
 
@@ -895,7 +898,7 @@ def checkFalsePositives(injection):
 
         kb.injection = injection
 
-        for i in xrange(conf.level):
+        for level in xrange(conf.level):
             while True:
                 randInt1, randInt2, randInt3 = (_() for j in xrange(3))
 
@@ -991,11 +994,6 @@ def checkFilteredChars(injection):
     kb.injection = popValue()
 
 def heuristicCheckSqlInjection(place, parameter):
-    if kb.nullConnection:
-        debugMsg = "heuristic check skipped because NULL connection used"
-        logger.debug(debugMsg)
-        return None
-
     if kb.heavilyDynamic:
         debugMsg = "heuristic check skipped because of heavy dynamicity"
         logger.debug(debugMsg)
@@ -1120,14 +1118,6 @@ def checkDynParam(place, parameter, value):
     try:
         payload = agent.payload(place, parameter, value, getUnicode(randInt))
         dynResult = Request.queryPage(payload, place, raise404=False)
-
-        if not dynResult:
-            infoMsg = "confirming that %s parameter '%s' is dynamic" % (paramType, parameter)
-            logger.info(infoMsg)
-
-            randInt = randomInt()
-            payload = agent.payload(place, parameter, value, getUnicode(randInt))
-            dynResult = Request.queryPage(payload, place, raise404=False)
     except SqlmapConnectionException:
         pass
 
@@ -1231,7 +1221,7 @@ def checkStability():
             logger.error(errMsg)
 
     else:
-        warnMsg = "target URL content is not stable. sqlmap will base the page "
+        warnMsg = "target URL content is not stable (i.e. content differs). sqlmap will base the page "
         warnMsg += "comparison on a sequence matcher. If no dynamic nor "
         warnMsg += "injectable parameters are detected, or in case of "
         warnMsg += "junk results, refer to user's manual paragraph "
@@ -1316,9 +1306,8 @@ def checkRegexp():
     rawResponse = "%s%s" % (listToStrValue(headers.headers if headers else ""), page)
 
     if not re.search(conf.regexp, rawResponse, re.I | re.M):
-        warnMsg = "you provided '%s' as the regular expression to " % conf.regexp
-        warnMsg += "match, but such a regular expression does not have any "
-        warnMsg += "match within the target URL raw response, sqlmap "
+        warnMsg = "you provided '%s' as the regular expression " % conf.regexp
+        warnMsg += "which does not have any match within the target URL raw response. sqlmap "
         warnMsg += "will carry on anyway"
         logger.warn(warnMsg)
 
@@ -1337,7 +1326,7 @@ def checkWaf():
     if _ is not None:
         if _:
             warnMsg = "previous heuristics detected that the target "
-            warnMsg += "is protected by some kind of WAF/IPS/IDS"
+            warnMsg += "is protected by some kind of WAF/IPS"
             logger.critical(warnMsg)
         return _
 
@@ -1345,7 +1334,7 @@ def checkWaf():
         return None
 
     infoMsg = "checking if the target is protected by "
-    infoMsg += "some kind of WAF/IPS/IDS"
+    infoMsg += "some kind of WAF/IPS"
     logger.info(infoMsg)
 
     retVal = False
@@ -1359,7 +1348,12 @@ def checkWaf():
         value = "" if not conf.parameters.get(PLACE.GET) else conf.parameters[PLACE.GET] + DEFAULT_GET_POST_DELIMITER
         value += "%s=%s" % (randomStr(), agent.addPayloadDelimiters(payload))
 
+    pushValue(kb.redirectChoice)
+    pushValue(kb.resendPostOnRedirect)
     pushValue(conf.timeout)
+
+    kb.redirectChoice = REDIRECTION.YES
+    kb.resendPostOnRedirect = False
     conf.timeout = IDS_WAF_CHECK_TIMEOUT
 
     try:
@@ -1368,16 +1362,19 @@ def checkWaf():
         retVal = True
     finally:
         kb.matchRatio = None
+
         conf.timeout = popValue()
+        kb.resendPostOnRedirect = popValue()
+        kb.redirectChoice = popValue()
 
     if retVal:
         warnMsg = "heuristics detected that the target "
-        warnMsg += "is protected by some kind of WAF/IPS/IDS"
+        warnMsg += "is protected by some kind of WAF/IPS"
         logger.critical(warnMsg)
 
         if not conf.identifyWaf:
             message = "do you want sqlmap to try to detect backend "
-            message += "WAF/IPS/IDS? [y/N] "
+            message += "WAF/IPS? [y/N] "
 
             if readInput(message, default='N', boolean=True):
                 conf.identifyWaf = True
@@ -1401,7 +1398,7 @@ def identifyWaf():
     kb.testMode = True
 
     infoMsg = "using WAF scripts to detect "
-    infoMsg += "backend WAF/IPS/IDS protection"
+    infoMsg += "backend WAF/IPS protection"
     logger.info(infoMsg)
 
     @cachedmethod
@@ -1428,7 +1425,7 @@ def identifyWaf():
             continue
 
         try:
-            logger.debug("checking for WAF/IPS/IDS product '%s'" % product)
+            logger.debug("checking for WAF/IPS product '%s'" % product)
             found = function(_)
         except Exception, ex:
             errMsg = "exception occurred while running "
@@ -1438,19 +1435,19 @@ def identifyWaf():
             found = False
 
         if found:
-            errMsg = "WAF/IPS/IDS identified as '%s'" % product
+            errMsg = "WAF/IPS identified as '%s'" % product
             logger.critical(errMsg)
 
             retVal.append(product)
 
     if retVal:
-        if kb.wafSpecificResponse and len(retVal) == 1 and "unknown" in retVal[0].lower():
+        if kb.wafSpecificResponse and "You don't have permission to access" not in kb.wafSpecificResponse and len(retVal) == 1 and "unknown" in retVal[0].lower():
             handle, filename = tempfile.mkstemp(prefix=MKSTEMP_PREFIX.SPECIFIC_RESPONSE)
             os.close(handle)
             with openFile(filename, "w+b") as f:
                 f.write(kb.wafSpecificResponse)
 
-            message = "WAF/IPS/IDS specific response can be found in '%s'. " % filename
+            message = "WAF/IPS specific response can be found in '%s'. " % filename
             message += "If you know the details on used protection please "
             message += "report it along with specific response "
             message += "to '%s'" % DEV_EMAIL_ADDRESS
@@ -1467,7 +1464,7 @@ def identifyWaf():
         if not choice:
             raise SqlmapUserQuitException
     else:
-        warnMsg = "WAF/IPS/IDS product hasn't been identified"
+        warnMsg = "WAF/IPS product hasn't been identified"
         logger.warn(warnMsg)
 
     kb.testType = None
@@ -1548,6 +1545,10 @@ def checkConnection(suppressOutput=False):
         kb.originalPage = kb.pageTemplate = page
 
         kb.errorIsNone = False
+
+        if any(_ in (kb.serverHeader or "") for _ in PRECONNECT_INCOMPATIBLE_SERVERS):
+            singleTimeWarnMessage("turning off pre-connect mechanism because of incompatible server ('%s')" % kb.serverHeader)
+            conf.disablePrecon = True
 
         if not kb.originalPage and wasLastResponseHTTPError():
             errMsg = "unable to retrieve page content"

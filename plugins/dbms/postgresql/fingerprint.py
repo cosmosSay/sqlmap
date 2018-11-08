@@ -45,7 +45,7 @@ class Fingerprint(GenericFingerprint):
         value += "active fingerprint: %s" % actVer
 
         if kb.bannerFp:
-            banVer = kb.bannerFp["dbmsVersion"] if 'dbmsVersion' in kb.bannerFp else None
+            banVer = kb.bannerFp.get("dbmsVersion")
             banVer = Format.getDbms([banVer])
             value += "\n%sbanner parsing fingerprint: %s" % (blank, banVer)
 
@@ -73,7 +73,7 @@ class Fingerprint(GenericFingerprint):
         infoMsg = "testing %s" % DBMS.PGSQL
         logger.info(infoMsg)
 
-        result = inject.checkBooleanExpression("[RANDNUM]::int=[RANDNUM]")
+        result = inject.checkBooleanExpression("QUOTE_IDENT(NULL) IS NULL")
 
         if result:
             infoMsg = "confirming %s" % DBMS.PGSQL

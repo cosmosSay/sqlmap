@@ -48,11 +48,11 @@ class Fingerprint(GenericFingerprint):
             (50000, 50096),  # MySQL 5.0
             (50100, 50172),  # MySQL 5.1
             (50400, 50404),  # MySQL 5.4
-            (50500, 50558),  # MySQL 5.5
-            (50600, 50638),  # MySQL 5.6
-            (50700, 50720),  # MySQL 5.7
+            (50500, 50564),  # MySQL 5.5
+            (50600, 50644),  # MySQL 5.6
+            (50700, 50726),  # MySQL 5.7
             (60000, 60014),  # MySQL 6.0
-            (80000, 80003),  # MySQL 8.0
+            (80000, 80015),  # MySQL 8.0
         )
 
         index = -1
@@ -124,7 +124,7 @@ class Fingerprint(GenericFingerprint):
             value += "\n%scomment injection fingerprint: %s" % (blank, comVer)
 
         if kb.bannerFp:
-            banVer = kb.bannerFp["dbmsVersion"] if "dbmsVersion" in kb.bannerFp else None
+            banVer = kb.bannerFp.get("dbmsVersion")
 
             if banVer and re.search(r"-log$", kb.data.banner):
                 banVer += ", logging enabled"

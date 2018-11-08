@@ -45,7 +45,6 @@ from lib.core.common import ntToPosixSlashes
 from lib.core.common import openFile
 from lib.core.common import parseRequestFile
 from lib.core.common import parseTargetDirect
-from lib.core.common import parseTargetUrl
 from lib.core.common import paths
 from lib.core.common import randomStr
 from lib.core.common import readCachedFileContent
@@ -104,7 +103,6 @@ from lib.core.settings import DEFAULT_PAGE_ENCODING
 from lib.core.settings import DEFAULT_TOR_HTTP_PORTS
 from lib.core.settings import DEFAULT_TOR_SOCKS_PORTS
 from lib.core.settings import DUMMY_URL
-from lib.core.settings import INJECT_HERE_REGEX
 from lib.core.settings import IS_WIN
 from lib.core.settings import KB_CHARS_BOUNDARY_CHAR
 from lib.core.settings import KB_CHARS_LOW_FREQUENCY_ALPHABET
@@ -608,22 +606,22 @@ def _setMetasploit():
         raise SqlmapFilePathException(errMsg)
 
 def _setWriteFile():
-    if not conf.wFile:
+    if not conf.fileWrite:
         return
 
     debugMsg = "setting the write file functionality"
     logger.debug(debugMsg)
 
-    if not os.path.exists(conf.wFile):
-        errMsg = "the provided local file '%s' does not exist" % conf.wFile
+    if not os.path.exists(conf.fileWrite):
+        errMsg = "the provided local file '%s' does not exist" % conf.fileWrite
         raise SqlmapFilePathException(errMsg)
 
-    if not conf.dFile:
+    if not conf.fileDest:
         errMsg = "you did not provide the back-end DBMS absolute path "
-        errMsg += "where you want to write the local file '%s'" % conf.wFile
+        errMsg += "where you want to write the local file '%s'" % conf.fileWrite
         raise SqlmapMissingMandatoryOptionException(errMsg)
 
-    conf.wFileType = getFileType(conf.wFile)
+    conf.fileWriteType = getFileType(conf.fileWrite)
 
 def _setOS():
     """
@@ -824,7 +822,7 @@ def _setTamperingFunctions():
 
 def _setWafFunctions():
     """
-    Loads WAF/IPS/IDS detecting functions from script(s)
+    Loads WAF/IPS detecting functions from script(s)
     """
 
     if conf.identifyWaf:
@@ -1369,6 +1367,14 @@ def _setHTTPCookies():
 
         conf.httpHeaders.append((HTTP_HEADER.COOKIE, conf.cookie))
 
+def _setHostname():
+    """
+    Set value conf.hostname
+    """
+
+    if conf.url:
+        conf.hostname = urlparse.urlsplit(conf.url).netloc.split(':')[0]
+
 def _setHTTPTimeout():
     """
     Set the HTTP timeout
@@ -1509,14 +1515,14 @@ def _cleanupOptions():
     if conf.url:
         conf.url = conf.url.strip()
 
-    if conf.rFile:
-        conf.rFile = ntToPosixSlashes(normalizePath(conf.rFile))
+    if conf.fileRead:
+        conf.fileRead = ntToPosixSlashes(normalizePath(conf.fileRead))
 
-    if conf.wFile:
-        conf.wFile = ntToPosixSlashes(normalizePath(conf.wFile))
+    if conf.fileWrite:
+        conf.fileWrite = ntToPosixSlashes(normalizePath(conf.fileWrite))
 
-    if conf.dFile:
-        conf.dFile = ntToPosixSlashes(normalizePath(conf.dFile))
+    if conf.fileDest:
+        conf.fileDest = ntToPosixSlashes(normalizePath(conf.fileDest))
 
     if conf.sitemapUrl and not conf.sitemapUrl.lower().startswith("http"):
         conf.sitemapUrl = "http%s://%s" % ('s' if conf.forceSSL else '', conf.sitemapUrl)
@@ -1532,14 +1538,6 @@ def _cleanupOptions():
 
     if conf.optimize:
         setOptimize()
-
-    match = re.search(INJECT_HERE_REGEX, conf.data or "")
-    if match:
-        kb.customInjectionMark = match.group(0)
-
-    match = re.search(INJECT_HERE_REGEX, conf.url or "")
-    if match:
-        kb.customInjectionMark = match.group(0)
 
     if conf.os:
         conf.os = conf.os.capitalize()
@@ -1699,7 +1697,7 @@ def _setConfAttributes():
     conf.tests = []
     conf.trafficFP = None
     conf.HARCollectorFactory = None
-    conf.wFileType = None
+    conf.fileWriteType = None
 
 def _setKnowledgeBaseAttributes(flushAll=True):
     """
@@ -1713,6 +1711,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.absFilePaths = set()
     kb.adjustTimeDelay = None
     kb.alerted = False
+    kb.aliasName = randomStr()
     kb.alwaysRefresh = None
     kb.arch = None
     kb.authHeader = None
@@ -1852,6 +1851,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.safeCharEncode = False
     kb.safeReq = AttribDict()
     kb.secondReq = None
+    kb.serverHeader = None
     kb.singleLogFlags = set()
     kb.skipSeqMatcher = False
     kb.reduceTests = None
@@ -2484,10 +2484,10 @@ def init():
     _resolveCrossReferences()
     _checkWebSocket()
 
-    parseTargetUrl()
     parseTargetDirect()
 
     if any((conf.url, conf.logFile, conf.bulkFile, conf.sitemapUrl, conf.requestFile, conf.googleDork, conf.liveTest)):
+        _setHostname()
         _setHTTPTimeout()
         _setHTTPExtraHeaders()
         _setHTTPCookies()
